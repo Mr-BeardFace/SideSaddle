@@ -1,0 +1,36 @@
+# Config — never commit real config (only config.yaml.example)
+config.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Session state and exports
+session_state.json
+ioc_*.csv
+beacons_*.csv
+activities_*.csv
+debug_*.json
+debug_*.txt
+
+# Logs
+*.log
+raw_*.log
+ioc_acc.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

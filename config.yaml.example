@@ -1,0 +1,74 @@
+# SideSaddle configuration
+# Copy to config.yaml and edit as needed.
+
+# Authentication — choose one:
+#   anthropic     (default) — API key: set ANTHROPIC_API_KEY env var or enter at first launch
+#   anthropic-sub           — Claude Pro/Max subscription; run --login first
+active_provider: anthropic
+
+# ── Op configuration ──────────────────────────────────────────────────────────
+# Required: set the active operation name before running.
+# Overridden by SS_OP env var (preferred for per-terminal session scoping).
+#
+#   Shell:   ssop op1         → sets SS_OP=op1 for the terminal, starts logging
+#   Persist: export SS_OP=op1 in ~/.zshenv
+#   Config:  uncomment current_op below (env var takes precedence)
+#
+# current_op: op1
+
+# Root directories — logs and output are organized as <root>/<op>/
+log_root:    ~/.local/share/sidesaddle
+output_root: ~/sidesaddle-output
+
+# Glob pattern for log files to watch (raw_*.log = script output, default)
+# Set to session_*.log if using the legacy zshrc-only logging (no script)
+log_glob: raw_*.log
+
+# ── Models ───────────────────────────────────────────────────────────────────
+
+# Default model — used when ioc_model / chat_model are not set
+model: claude-sonnet-4-6
+
+# Per-agent model overrides (optional — falls back to model if unset)
+# ioc_model:  claude-haiku-4-5-20251001   # cheap fast extraction
+# chat_model: claude-sonnet-4-6            # richer reasoning for advisor
+
+# Seconds to wait after last new log entry before triggering analysis
+# (batches rapid commands into one LLM call)
+debounce_seconds: 30
+
+# Maximum seconds between analyses even with no new entries (0 = off)
+# analysis_interval: 300
+
+# brief  — one-line advisory items
+# verbose — items with explanation
+verbosity: brief
+
+# Set to false to disable automatic analysis on new log entries
+auto_analysis: true
+
+# Max characters of command output sent to the LLM per entry.
+# Output beyond this is truncated — the LLM summarizes from what it sees.
+max_output_chars: 800
+
+# Lines of output kept per command block in the preprocessed IOC log.
+# Interactive sessions (SSH, evil-winrm) keep this many lines for target context.
+ioc_output_lines: 20
+
+# Chunk size (chars) for manual Analyze Now across large log sets.
+# Each chunk is one LLM call; chunks split on ### log boundaries.
+# Reduce if hitting subscription "credits required" errors.
+analyze_chunk_size: 40000
+
+# Optional folder of external analyst notes (markdown/text files) to include in analysis.
+# Images (PNG/JPG/WEBP/GIF) in this folder are sent as vision blocks.
+# notes_dir: ~/path/to/notes
+# notes_glob: "*.md,*.txt"
+
+# C2 teamserver URL for activity forwarding (optional).
+# Can also be set with --c2 <url> at runtime.
+# Push format is NOT yet implemented — see core/c2_client.py.
+# c2_url: http://teamserver:8080
+
+# Debug mode — writes raw LLM input/output to output_dir for inspection.
+debug: false
