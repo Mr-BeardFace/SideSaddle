@@ -86,8 +86,7 @@ def store_key(key: str) -> None:
 
 # ── Subscription OAuth path ───────────────────────────────────────────────────
 
-# Register your own OAuth app at https://console.anthropic.com/ and set this,
-# or leave blank and use an API key (active_provider: anthropic in config.yaml).
+# Set by _load_external_providers() from ~/.config/sidesaddle/providers_local.py
 _SUB_CLIENT_ID  = ""
 _SUB_TOKEN_URL  = "https://platform.claude.com/v1/oauth/token"
 _SUB_AUTH_URL   = "https://claude.ai/oauth/authorize"
@@ -391,3 +390,44 @@ class LLMClient:
                 time.sleep(wait); wait = min(wait * 2, 30)
             except anthropic.BadRequestError:
                 raise
+
+
+# ── External providers (operator-private) ─────────────────────────────────────
+# Drop ~/.config/sidesaddle/providers_local.py exposing register(api) to
+# override _SUB_CLIENT_ID or the full subscription handler. Never committed.
+
+def _ext_providers_path() -> Path:
+    override = os.environ.get("SIDESADDLE_LOCAL_PROVIDERS")
+    return Path(override) if override else Path.home() / ".config" / "sidesaddle" / "providers_local.py"
+
+
+def _load_external_providers() -> None:
+    import importlib.util, sys as _sys
+    path = _ext_providers_path()
+    if not path.is_file():
+        return
+    try:
+        spec = importlib.util.spec_from_file_location("sidesaddle_providers_local", str(path))
+        mod  = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        reg = getattr(mod, "register", None)
+        if callable(reg):
+            reg(_external_api())
+    except Exception as e:
+        print(f"[providers_local] failed to load {path}: {e}", file=_sys.stderr)
+
+
+def _external_api():
+    """Minimal API surface passed to providers_local.register()."""
+    import types
+    ns = types.SimpleNamespace()
+    ns.set_sub_client_id = _set_sub_client_id
+    return ns
+
+
+def _set_sub_client_id(client_id: str) -> None:
+    global _SUB_CLIENT_ID
+    _SUB_CLIENT_ID = client_id
+
+
+_load_external_providers()

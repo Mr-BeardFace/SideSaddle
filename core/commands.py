@@ -270,8 +270,13 @@ def dispatch(text: str, analyst: "Analyst") -> CommandResult | None:
         lines = ["── Config ──────────────────────────────"]
         cur = cfg("model", "")
         for key, typ, desc in _CONFIG_KEYS:
-            val = cfg(key, "(unset)")
-            marker = " ◀ active" if key == "model" and val == cur else ""
+            if key == "current_op":
+                env_op = os.environ.get("SS_OP")
+                val = env_op if env_op else cfg(key, "(unset)")
+                marker = "  [SS_OP env]" if env_op else ""
+            else:
+                val    = cfg(key, "(unset)")
+                marker = " ◀ active" if key == "model" and val == cur else ""
             lines.append(f"  {key:<26} {val}{marker}")
         return CommandResult(lines)
 
