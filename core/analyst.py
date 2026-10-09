@@ -1088,7 +1088,31 @@ class Analyst:
         history = self._history[-20:]
 
         try:
-            # Tool loop — AI may call read_file
+            import re as _re
+            _url_re = _re.compile(r'https?://[^\s<>"\']+[^\s<>"\',.]')
+
+            # Pre-seed allowed URLs from operator messages in history
+            _allowed_urls: set[str] = set()
+            for _msg in history:
+                if _msg.get("role") == "user":
+                    _c = _msg.get("content", "")
+                    if isinstance(_c, str):
+                        _allowed_urls.update(_url_re.findall(_c))
+
+            # Build known-targets set (rebuilt once per chat call, not per tool call)
+            _targets: set[str] = set()
+            for _b in self.beacons:
+                for _v in (_b.hostname, _b.external_ip):
+                    if _v:
+                        _targets.add(_v.strip())
+                for _ip in _b.internal_ips.split(","):
+                    if _ip.strip():
+                        _targets.add(_ip.strip())
+            for _a in self.activities:
+                if _a.execution_host and _a.execution_host != "OpStation":
+                    _targets.add(_a.execution_host.strip())
+
+            # Tool loop
             messages = list(history)
             while True:
                 resp = self._llm.call(system, messages, tools=_CHAT_TOOLS,
@@ -1113,22 +1137,15 @@ class Analyst:
                         result = _write_file(i.get("path", ""), i.get("content", ""))
                     elif tc.name == "append_file":
                         result = _append_file(i.get("path", ""), i.get("content", ""))
-                    elif tc.name == "fetch_url":
-                        # Build known-targets set from session beacons and activities
-                        _targets: set[str] = set()
-                        for _b in self.beacons:
-                            for _v in (_b.hostname, _b.external_ip):
-                                if _v:
-                                    _targets.add(_v.strip())
-                            for _ip in _b.internal_ips.split(","):
-                                if _ip.strip():
-                                    _targets.add(_ip.strip())
-                        for _a in self.activities:
-                            if _a.execution_host and _a.execution_host != "OpStation":
-                                _targets.add(_a.execution_host.strip())
-                        result = _fetch_url(i.get("url", ""), _targets)
                     elif tc.name == "web_search":
                         result = _web_search(i.get("query", ""), i.get("max_results", 5))
+                        _allowed_urls.update(_url_re.findall(result))
+                    elif tc.name == "fetch_url":
+                        url = i.get("url", "")
+                        if url not in _allowed_urls:
+                            result = f"Blocked: {url} was not returned by web_search or provided by the operator."
+                        else:
+                            result = _fetch_url(url, _targets)
                     else:
                         result = "unknown tool"
                     results.append({"type": "tool_result", "tool_use_id": tc.id, "content": result})
