@@ -786,7 +786,7 @@ def run_batch(log_dir: Path | None, output_dir: Path | None) -> None:
         op, op_log_dir, op_out_dir = resolve_op()
         if not op:
             print("Error: no op set and no --log-dir given.\n"
-                  "  Set SS_OP env var or pass --log-dir / --output-dir explicitly.")
+                  "  Use --op <name> or set current_op in config.yaml.")
             sys.exit(1)
         log_dir    = log_dir    or op_log_dir
         output_dir = output_dir or op_out_dir
@@ -821,7 +821,7 @@ def run_batch(log_dir: Path | None, output_dir: Path | None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="SideSaddle — red team op logger")
-    parser.add_argument("--op",         metavar="NAME",  help="Operation name (required unless SS_OP env var or current_op config is set)")
+    parser.add_argument("--op",         metavar="NAME",  help="Operation name (required unless current_op is set in config.yaml)")
     parser.add_argument("--c2",         metavar="URL",   help="C2 teamserver URL for activity forwarding (template — not yet implemented)")
     parser.add_argument("--analyze",    action="store_true")
     parser.add_argument("--login",      action="store_true")
@@ -833,17 +833,17 @@ def main() -> None:
         run_login()
         return
 
-    # Set SS_OP from --op flag so resolve_op() picks it up everywhere
+    # Bridge --op into resolve_op() which reads SS_OP or current_op config
     if args.op:
         os.environ["SS_OP"] = args.op
 
-    # Validate op is set (--op flag, SS_OP env var, or current_op in config)
+    # Validate op is set (--op flag or current_op in config)
     op, _, _ = resolve_op()
     if not op:
         parser.error(
             "no operation set — use --op <name>\n"
             "  Example:  python3 SideSaddle.py --op op1\n"
-            "  Or set:   SS_OP=op1  (env var)  |  current_op: op1  (config.yaml)"
+            "  Or set:   current_op: op1  in config.yaml"
         )
 
     # Build C2 client from config (c2: block) or --c2 URL override

@@ -39,12 +39,7 @@ bash configure.sh
 
 This installs the zsh hooks, sets up `script` auto-start, and writes the evil-winrm prompt override.
 
-**2. Set your op and open a new terminal:**
-
-```bash
-ssop op1          # sets SS_OP, creates log dir
-# open a new terminal — script starts automatically
-```
+**2. Open a new terminal — logging starts automatically.**
 
 **3. Run SideSaddle:**
 
@@ -52,11 +47,10 @@ ssop op1          # sets SS_OP, creates log dir
 python3 SideSaddle.py --op op1
 ```
 
-The `--op` flag is required. Alternatives:
+The `--op` flag is required. Alternative — set once in `config.yaml`:
 
 ```bash
-SS_OP=op1 python3 SideSaddle.py          # env var
-# or set current_op: op1 in config.yaml  # persistent
+# or set current_op: op1 in config.yaml  # persistent, no flag needed
 ```
 
 **4. (First time) Set your API key:**

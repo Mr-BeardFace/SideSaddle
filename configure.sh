@@ -39,19 +39,19 @@ echo "[+] Evil-WinRM prompt script → ${EW_SCRIPTS}/prompt.ps1"
 # ── Zsh configuration block ───────────────────────────────────────────────────
 
 ZSHRC="${HOME}/.zshrc"
-OLD_MARKER="# === SideSaddle session logging ==="
-MARKER="# === SideSaddle session logging v2 ==="
+MARKER="# === SideSaddle session logging v3 ==="
 
-# Remove old block if present so we can reinstall with the new version
-if grep -qF "${OLD_MARKER}" "${ZSHRC}" 2>/dev/null; then
-    sed -i '/^# === SideSaddle session logging ===/,/^# === end SideSaddle ===/d' "${ZSHRC}"
-    echo "[~] Removed old SideSaddle block — reinstalling"
-fi
+# Remove any older SideSaddle blocks so we can reinstall cleanly
+for OLD in "# === SideSaddle session logging ===" \
+           "# === SideSaddle session logging v2 ===" \
+           "# === SideSaddle session logging v3 ==="; do
+    if grep -qF "${OLD}" "${ZSHRC}" 2>/dev/null; then
+        sed -i "/^${OLD}/,/^# === end SideSaddle ===/d" "${ZSHRC}"
+        echo "[~] Removed old SideSaddle block (${OLD})"
+    fi
+done
 
-if grep -qF "${MARKER}" "${ZSHRC}" 2>/dev/null; then
-    echo "[~] Zshrc already configured (v2) — skipping (remove ${MARKER} block to re-run)"
-else
-    cat >> "${ZSHRC}" << ZSHBLOCK
+cat >> "${ZSHRC}" << ZSHBLOCK
 
 ${MARKER}
 _SS_ROOT="\${SS_LOG_ROOT:-${LOG_ROOT}}"
@@ -71,7 +71,6 @@ _ss_skip() {
 _ss_preexec() {
     _ss_skip "\$1" && return
     [[ -z "\${_SS_CURRENT_LOG:-}" ]] && return
-    # Write ### marker directly to the log file — keeps terminal output clean
     printf '\\n### %s %s\$%s %s\\n' \\
         "\$(date +'%Y-%m-%d %H:%M:%S')" "\${USER}" "\${PWD}" "\$1" >> "\${_SS_CURRENT_LOG}"
 }
@@ -79,31 +78,16 @@ _ss_preexec() {
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec _ss_preexec
 
-# ssop — set the active op for this terminal session
-# Usage: ssop op1
-ssop() {
-    [[ -z "\$1" ]] && { echo "Usage: ssop <op_name>"; return 1; }
-    export SS_OP="\$1"
-    local dir="\${_SS_ROOT}/\${SS_OP}"
-    mkdir -p "\${dir}"
-    echo "[SideSaddle] Op: \${SS_OP} → \${dir}"
-    echo "[SideSaddle] Open a new terminal (or new tmux window) to start logging."
-}
-
-# Start script session — only if SS_OP is set and not already in a script session
+# Auto-start script session for every interactive terminal
 if [[ -z "\${SCRIPT_LOG_ACTIVE}" && -t 0 ]]; then
-    if [[ -n "\${SS_OP:-}" ]]; then
-        export SCRIPT_LOG_ACTIVE=1
-        _ss_dir="\${_SS_ROOT}/\${SS_OP}"
-        mkdir -p "\${_ss_dir}"
-        export _SS_CURRENT_LOG="\${_ss_dir}/raw_\$(date +%Y%m%d_%H%M%S)_\$\$.log"
-        exec script -q -f "\${_SS_CURRENT_LOG}"
-    fi
+    export SCRIPT_LOG_ACTIVE=1
+    mkdir -p "\${_SS_ROOT}"
+    export _SS_CURRENT_LOG="\${_SS_ROOT}/raw_\$(date +%Y%m%d_%H%M%S)_\$\$.log"
+    exec script -q -f "\${_SS_CURRENT_LOG}"
 fi
 # === end SideSaddle ===
 ZSHBLOCK
-    echo "[+] Zshrc configured → ${ZSHRC}"
-fi
+echo "[+] Zshrc configured → ${ZSHRC}"
 
 # ── Evil-WinRM alias ──────────────────────────────────────────────────────────
 

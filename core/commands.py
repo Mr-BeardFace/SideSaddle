@@ -18,13 +18,14 @@ def resolve_op() -> tuple[str | None, Path | None, Path | None]:
     """Return (op_name, log_dir, output_dir) or (None, None, None) if no op set.
 
     Priority: SS_OP env var > current_op config.
+    Logs are always read from log_root (flat); outputs go to output_root/op.
     """
     op = os.environ.get("SS_OP") or cfg("current_op", "")
     if not op:
         return None, None, None
     log_root    = Path(cfg("log_root",    "~/.local/share/sidesaddle")).expanduser()
     output_root = Path(cfg("output_root", "~/sidesaddle-output")).expanduser()
-    return op, log_root / op, output_root / op
+    return op, log_root, output_root / op
 
 
 # ── Command registry ──────────────────────────────────────────────────────────
@@ -79,8 +80,8 @@ _BY_NAME: dict[str, Command] = {c.name: c for c in COMMANDS}
 
 _CONFIG_KEYS: list[tuple[str, str, str]] = [
     # (key,                   type,   description)
-    ("current_op",          "str",    "Active op name — overridden by SS_OP env var"),
-    ("log_root",            "str",    "Root dir for op log folders (~/.local/share/sidesaddle)"),
+    ("current_op",          "str",    "Active op name — overridden by --op flag at runtime"),
+    ("log_root",            "str",    "Root dir for log files (~/.local/share/sidesaddle)"),
     ("output_root",         "str",    "Root dir for op output folders (~/sidesaddle-output)"),
     ("debug",               "bool",   "Debug mode — dumps raw LLM input/output"),
     ("auto_analysis",       "bool",   "Auto-analyse new log entries"),
@@ -227,10 +228,9 @@ def dispatch(text: str, analyst: "Analyst") -> CommandResult | None:
         if not op:
             return CommandResult([
                 "  No op set.",
-                "  Set SS_OP env var:    export SS_OP=op1  (then open new terminal)",
-                "  Or set in config:     /op set op1",
+                "  Pass --op <name> on launch, or set current_op in config.yaml.",
             ])
-        src = "SS_OP env" if os.environ.get("SS_OP") else "config"
+        src = "--op flag" if os.environ.get("SS_OP") else "config"
         return CommandResult([
             f"  op:        {op}  [{src}]",
             f"  log dir:   {log_dir}",
@@ -244,7 +244,7 @@ def dispatch(text: str, analyst: "Analyst") -> CommandResult | None:
         set_cfg("current_op", new_op)
         return CommandResult([
             f"  current_op = {new_op}",
-            "  Restart SideSaddle to apply. (SS_OP env var takes precedence if set.)",
+            "  Restart SideSaddle to apply. (--op flag takes precedence if passed.)",
         ])
 
     if path == "/help":
@@ -273,7 +273,7 @@ def dispatch(text: str, analyst: "Analyst") -> CommandResult | None:
             if key == "current_op":
                 env_op = os.environ.get("SS_OP")
                 val = env_op if env_op else cfg(key, "(unset)")
-                marker = "  [SS_OP env]" if env_op else ""
+                marker = "  [--op flag]" if env_op else ""
             else:
                 val    = cfg(key, "(unset)")
                 marker = " ◀ active" if key == "model" and val == cur else ""
