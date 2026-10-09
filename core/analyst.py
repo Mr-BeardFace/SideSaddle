@@ -290,6 +290,18 @@ _CHAT_TOOLS = [
         },
     },
     {
+        "name": "web_search",
+        "description": "Search the public internet for CVEs, tools, techniques, or general research. Do NOT use this to probe or interact with any target system — queries go to Brave Search only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query":       {"type": "string",  "description": "Search query"},
+                "max_results": {"type": "integer", "description": "Number of results to return (default 5, max 10)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "write_file",
         "description": "Write (create or overwrite) a file inside the configured working_dir. Fails if working_dir is not set or the path resolves outside it.",
         "input_schema": {
@@ -1090,6 +1102,8 @@ class Analyst:
                         result = _write_file(i.get("path", ""), i.get("content", ""))
                     elif tc.name == "append_file":
                         result = _append_file(i.get("path", ""), i.get("content", ""))
+                    elif tc.name == "web_search":
+                        result = _web_search(i.get("query", ""), i.get("max_results", 5))
                     else:
                         result = "unknown tool"
                     results.append({"type": "tool_result", "tool_use_id": tc.id, "content": result})
@@ -1207,3 +1221,36 @@ def _append_file(path: str, content: str) -> str:
         return f"Appended {len(content)} bytes to {target}"
     except Exception as e:
         return f"Error appending to {path}: {e}"
+
+
+def _web_search(query: str, max_results: int = 5) -> str:
+    import urllib.request, urllib.parse, json as _json
+    from core.llm_client import cfg as _cfg
+    key = os.environ.get("BRAVE_API_KEY") or _cfg("brave_api_key", "")
+    if not key:
+        return "Web search unavailable: set BRAVE_API_KEY env var or /config set brave_api_key <key>"
+    url = "https://api.search.brave.com/res/v1/web/search?" + urllib.parse.urlencode({
+        "q": query,
+        "count": max(1, min(max_results, 10)),
+    })
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/json",
+        "X-Subscription-Token": key,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read())
+    except Exception as e:
+        return f"Search error: {e}"
+    results = data.get("web", {}).get("results", [])
+    if not results:
+        return "(no results)"
+    lines = []
+    for r in results:
+        lines.append(r.get("title", ""))
+        lines.append(r.get("url", ""))
+        desc = r.get("description", "").strip()
+        if desc:
+            lines.append(desc)
+        lines.append("")
+    return "\n".join(lines).strip()
