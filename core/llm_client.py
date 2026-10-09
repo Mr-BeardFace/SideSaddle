@@ -3,8 +3,11 @@
 active_provider in config.yaml:
   anthropic     — standard API key (ANTHROPIC_API_KEY env var or keyring)
   anthropic-sub — Claude Pro/Max subscription via OAuth
-                  (set _SUB_CLIENT_ID to your OAuth app's client ID,
-                   or override token path with $SIDESADDLE_SUB_TOKENS)
+
+Auth is discovered automatically in priority order:
+  API key:      ANTHROPIC_API_KEY env → keyring "sidesaddle" → keyring "pentest-ai"
+  Sub tokens:   $SIDESADDLE_SUB_TOKENS → ~/.config/sidesaddle/... → ~/.config/pdtmj-ai/...
+  OAuth client: ~/.config/sidesaddle/providers_local.py → ~/.config/pdtmj-ai/providers_local.py
 """
 from __future__ import annotations
 import json
@@ -63,6 +66,8 @@ class APIConnectionError(Exception):
 # ── API-key path ──────────────────────────────────────────────────────────────
 
 _KEYRING_SVC = "sidesaddle"
+# Checked in order: own service first, then pdtmj-ai fallback
+_KEYRING_FALLBACKS = ("sidesaddle", "pentest-ai")
 
 
 def resolve_key() -> str | None:
@@ -71,9 +76,13 @@ def resolve_key() -> str | None:
         return key
     try:
         import keyring
-        return keyring.get_password(_KEYRING_SVC, "anthropic_api_key")
+        for svc in _KEYRING_FALLBACKS:
+            k = keyring.get_password(svc, "anthropic_api_key")
+            if k:
+                return k
     except Exception:
-        return None
+        pass
+    return None
 
 
 def store_key(key: str) -> None:
@@ -102,27 +111,41 @@ _SUB_SYS_PREFIX = "You are a Claude agent, built on Anthropic's Claude Agent SDK
 _EXPIRY_BUFFER  = 5 * 60  # refresh 5 min before expiry
 
 _SUB_TOKENS_DEFAULT = Path.home() / ".config" / "sidesaddle" / "anthropic_sub_tokens.json"
-
+_SUB_TOKENS_PDTMJ   = Path.home() / ".config" / "pdtmj-ai"   / "anthropic_sub_tokens.json"
 
 _SUB_TOKENS_OVERRIDE: Path | None = None  # set by providers_local.py via api.set_tokens_path()
+_active_token_path:   Path | None = None  # the file we last read tokens from; write target
 
 
-def _tokens_path() -> Path:
+def _token_paths() -> list[Path]:
+    """Ordered list of token files to check, highest priority first."""
+    paths: list[Path] = []
     if _SUB_TOKENS_OVERRIDE is not None:
-        return _SUB_TOKENS_OVERRIDE
-    override = os.environ.get("SIDESADDLE_SUB_TOKENS")
-    return Path(override) if override else _SUB_TOKENS_DEFAULT
+        paths.append(_SUB_TOKENS_OVERRIDE)
+    env = os.environ.get("SIDESADDLE_SUB_TOKENS")
+    if env:
+        paths.append(Path(env).expanduser())
+    paths.append(_SUB_TOKENS_DEFAULT)
+    paths.append(_SUB_TOKENS_PDTMJ)  # auto-fallback to pdtmj-ai tokens
+    return paths
 
 
 def _tokens_read() -> dict:
-    try:
-        return json.loads(_tokens_path().read_text())
-    except Exception:
-        return {}
+    global _active_token_path
+    for path in _token_paths():
+        try:
+            data = json.loads(path.read_text())
+            if data.get("anthropic_sub_access"):
+                _active_token_path = path
+                return data
+        except Exception:
+            pass
+    _active_token_path = _SUB_TOKENS_OVERRIDE or _SUB_TOKENS_DEFAULT
+    return {}
 
 
 def _tokens_write(data: dict) -> None:
-    path = _tokens_path()
+    path = _active_token_path or _SUB_TOKENS_OVERRIDE or _SUB_TOKENS_DEFAULT
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -408,18 +431,38 @@ def _ext_providers_path() -> Path:
 
 def _load_external_providers() -> None:
     import importlib.util, sys as _sys
+    # 1. sidesaddle-specific providers_local.py (highest priority)
     path = _ext_providers_path()
+    if path.is_file():
+        try:
+            spec = importlib.util.spec_from_file_location("sidesaddle_providers_local", str(path))
+            mod  = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            reg = getattr(mod, "register", None)
+            if callable(reg):
+                reg(_external_api())
+        except Exception as e:
+            print(f"[providers_local] failed to load {path}: {e}", file=_sys.stderr)
+
+    # 2. Auto-discover OAuth CLIENT_ID from pdtmj-ai's providers_local.py if still unset
+    if not _SUB_CLIENT_ID:
+        _autodiscover_client_id()
+
+
+def _autodiscover_client_id() -> None:
+    """Read CLIENT_ID from pdtmj-ai's providers_local.py by text scan (no import needed)."""
+    global _SUB_CLIENT_ID
+    path = Path.home() / ".config" / "pdtmj-ai" / "providers_local.py"
     if not path.is_file():
         return
     try:
-        spec = importlib.util.spec_from_file_location("sidesaddle_providers_local", str(path))
-        mod  = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        reg = getattr(mod, "register", None)
-        if callable(reg):
-            reg(_external_api())
-    except Exception as e:
-        print(f"[providers_local] failed to load {path}: {e}", file=_sys.stderr)
+        import re
+        text = path.read_text(encoding="utf-8", errors="replace")
+        m = re.search(r'^CLIENT_ID\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+        if m:
+            _SUB_CLIENT_ID = m.group(1)
+    except Exception:
+        pass
 
 
 def _external_api():
