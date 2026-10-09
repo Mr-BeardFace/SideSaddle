@@ -2,18 +2,18 @@
 
 > ⚠️ **Work in progress** — functional but actively developed. Interfaces, log formats, and C2 integration are subject to change.
 
-A red team op logger and tactical advisor. Captures terminal sessions at the TTY level, extracts IOCs, and provides an AI-powered operator assistant to track state, flag OPSEC issues, and suggest next steps — all without leaving your terminal.
+A red team op logger and tactical advisor. Captures terminal sessions at the TTY level, pulls C2 console logs, extracts IOCs, and provides an AI-powered operator assistant to track state, flag OPSEC issues, and suggest next steps — all without leaving your terminal.
 
 ---
 
 ## What it does
 
 - **TTY-level capture** via `script` — catches everything typed, including inside SSH, evil-winrm, and other interactive shells
-- **Two-log pipeline** — raw capture preprocessed into an IOC log (commands only) and a session log (cleaned output for the advisor)
-- **AI advisor** — Sonnet-powered chat that tracks your op picture: hosts, credentials found, attack paths, live OPSEC warnings
-- **IOC extraction** — structured CSV export of every executed command with target attribution, execution context, and observable artifacts
+- **C2 log polling** — pulls Nighthawk console logs per-beacon, correlates with terminal activity; stubs ready for Cobalt Strike / Sliver / Havoc
+- **AI advisor** — Sonnet-powered chat that tracks your op picture: hosts, credentials found, attack paths, live OPSEC warnings; sees both terminal and C2 activity
+- **IOC extraction** — structured export of every executed command with beacon attribution, execution context (`C2 > HOST` / `Proxychains > C2 > HOST` / `<local>`), and observable artifacts
+- **IOC export** — activities CSV + beacons CSV + Excel workbook (two sheets) per run
 - **Op-scoped logging** — all logs and outputs go to `<root>/<op>/`; multiple ops, no mixing
-- **C2 backend** — Nighthawk console log polling implemented; stubs for Cobalt Strike / Sliver / Havoc push
 
 ---
 
@@ -23,7 +23,7 @@ A red team op logger and tactical advisor. Captures terminal sessions at the TTY
 - Linux or WSL (TTY capture uses `script`)
 - Anthropic API key **or** Claude Pro/Max subscription
 
-```
+```bash
 pip install -r requirements.txt
 ```
 
@@ -82,37 +82,52 @@ Key settings:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `log_root` | `~/.local/share/sidesaddle` | Root for op log folders |
-| `output_root` | `~/sidesaddle-output` | Root for CSV exports |
+| `output_root` | `~/sidesaddle-output` | Root for CSV/Excel exports |
 | `model` | `claude-sonnet-4-6` | Default model |
 | `ioc_model` | *(uses model)* | Model for IOC extraction — Haiku recommended |
 | `chat_model` | *(uses model)* | Model for advisor chat |
 | `debounce_seconds` | `30` | Seconds to wait before auto-analysis |
 | `auto_analysis` | `true` | Auto-analyze on new log entries |
 
+### C2 backend
+
+```yaml
+c2:
+  type: nighthawk          # nighthawk | cobalt_strike | sliver | havoc | generic
+  url: https://teamserver:4443
+  auth:
+    username: operator
+    password: changeme
+  poll_seconds: 30         # how often to pull console logs
+  verify_tls: true         # set false for self-signed certs
+```
+
+The `--c2 <url>` flag overrides `c2.url` at runtime. NH session token is cached to `~/.config/sidesaddle/nh_state.json`; per-agent poll state persists across restarts.
+
 ---
 
 ## Usage
 
 ```
-python3 SideSaddle.py --op <name>           # TUI mode
-python3 SideSaddle.py --op <name> --analyze # batch analysis of existing logs
-python3 SideSaddle.py --op <name> --c2 <url> # override C2 URL (type/auth set in config.yaml)
-python3 SideSaddle.py --login               # subscription auth flow
+python3 SideSaddle.py --op <name>            # TUI mode
+python3 SideSaddle.py --op <name> --analyze  # batch analysis of existing logs
+python3 SideSaddle.py --op <name> --c2 <url> # override C2 URL at runtime
+python3 SideSaddle.py --login                # subscription auth flow
 ```
 
 ### TUI commands
 
 | Command | Description |
 |---------|-------------|
-| `/ioc [YYYY-MM-DD \| all]` | Build IOC log from disk logs |
-| `/export` | Export activities and beacons to CSV |
+| `/ioc [YYYY-MM-DD \| all]` | Build IOC log — writes activities CSV, beacons CSV, and Excel |
+| `/export` | Export live session state to CSV + Excel |
 | `/info` | Session state snapshot |
 | `/config` | View/change settings live |
 | `/op` | Show current op and log paths |
 | `/stop` | Cancel in-progress IOC analysis |
 | `/help` | Full command reference |
 
-`Tab` autocompletes commands. `Ctrl+N` → IOC log, `Ctrl+E` → export CSV, `Ctrl+I` → advisory history.
+`Tab` autocompletes commands. `Ctrl+N` → IOC log, `Ctrl+E` → export, `Ctrl+I` → advisory history.
 
 ---
 
@@ -123,14 +138,41 @@ script (TTY capture)
   └─ raw_*.log
        └─ LogWatcher (5s poll)
             └─ preprocessor.preprocess()
-                 ├─ ioc_acc.log  → IOC agent (Haiku) → ioc_log_*.csv
+                 ├─ ioc_acc.log  → IOC agent (Haiku) → ioc_*_activities.csv
                  └─ session chunk → Advisor agent (Sonnet) → TUI + session_state.json
+
+NH teamserver (or other C2)
+  └─ NighthawkBackend (poll_seconds interval)
+       └─ Console/list per agent
+            ├─ c2_events_{clientId}.log  ─┐
+            │    # BEACON artifact block  │→ /ioc reads both → ioc_*_beacons.csv
+            │    ### commands             │                  → ioc_*.xlsx
+            └────────────────────────────┘
+            └─ NewLog → Advisor agent (live C2 context)
 ```
 
 - **Preprocessor** — pure Python, no LLM; strips ANSI, collapses TUI sessions, annotates targets, redacts credentials
-- **IOC agent** — extracts structured activity records; one call per chunk
-- **Advisor agent** — maintains living op picture; answers operator questions; can read files via tool use
-- **C2 client** — stub for forwarding to a teamserver (see `core/c2_client.py`)
+- **IOC agent** — extracts structured activity records with `beacon_id` and execution context; one LLM call per chunk
+- **Advisor agent** — maintains living op picture; correlates C2 and terminal activity; answers operator questions
+- **C2 backend** — `build_c2_client()` factory reads `c2.type` from config; NH pull implemented; push stubs for CS/Sliver/Havoc in `core/c2_client.py`
+
+### IOC output files
+
+`/ioc` produces three files per run (all in `output_root/<op>/`):
+
+| File | Purpose |
+|------|---------|
+| `ioc_{ts}_activities.csv` | Every executed command — `beacon_id`, `execution_context`, `execution_host`, `command_action`, `result`, `observable_artifacts` |
+| `ioc_{ts}_beacons.csv` | C2 artifacts — `c2_type`, `hostname`, `external_ip`, `internal_ips`, `process`, `listener`, `first_seen`, `last_seen` |
+| `ioc_{ts}.xlsx` | Both sheets in one workbook (requires `openpyxl`) |
+
+### Execution contexts
+
+| Context | Meaning |
+|---------|---------|
+| `C2 > HOST` | Command sent directly through a beacon |
+| `Proxychains > C2 > HOST` | Local command routed through a beacon's SOCKS proxy |
+| `<local>` | Direct connection from OpStation with no C2 (flag as OPSEC risk) |
 
 ---
 
@@ -155,7 +197,8 @@ function prompt {
 - [x] Op-scoped logging with `--op` flag
 - [x] Per-agent model split (ioc_model / chat_model)
 - [x] Env check on startup
-- [x] C2 backend — Nighthawk log polling
+- [x] Nighthawk C2 — per-beacon log polling, beacon artifacts, cross-source correlation
+- [x] IOC export — activities CSV + beacons CSV + Excel workbook
 - [ ] C2 push implementation (Cobalt Strike / Havoc / Sliver / generic)
 - [ ] Prompt caching for API-key path
 - [ ] Web UI / multi-operator support
