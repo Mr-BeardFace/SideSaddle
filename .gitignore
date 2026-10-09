@@ -1,6 +1,9 @@
 # Config — never commit real config (only config.yaml.example)
 config.yaml
 
+# C2 API docs — may contain sensitive teamserver details
+swagger.json
+
 # Python
 __pycache__/
 *.py[cod]
@@ -24,6 +27,8 @@ debug_*.txt
 *.log
 raw_*.log
 ioc_acc.log
+c2_events_*.log
+nh_state.json
 
 # OS
 .DS_Store

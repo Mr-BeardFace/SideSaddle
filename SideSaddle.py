@@ -27,7 +27,7 @@ from core.llm_client import (
 )
 from core.log_watcher import LogWatcher
 from core.analyst import Analyst
-from core.c2_client import C2Client
+from core.c2_client import C2Backend, build_c2_client
 from core.preprocessor import preprocess
 import core.commands as commands
 from core.commands import resolve_op
@@ -333,7 +333,7 @@ class SideSaddleApp(App[None]):
     TITLE = "SideSaddle"
 
     def __init__(self, env_warnings: list[str] | None = None,
-                 c2_client: "C2Client | None" = None) -> None:
+                 c2_client: "C2Backend | None" = None) -> None:
         self._env_warnings = env_warnings or []
         self._c2_client    = c2_client
         super().__init__()
@@ -439,6 +439,21 @@ class SideSaddleApp(App[None]):
                 glob=cfg("log_glob", "raw_*.log"),
             )
             self._watcher.start()
+
+            # Start NH (or other pull-based) polling — one c2_events_{agentId}.log
+            # per beacon; accumulates across sessions; analyst globs c2_events_*.log.
+            if self._c2_client:
+                _c2_dir = log_dir_path
+                def _write_c2(agent_id: str, text: str, _d: Path = _c2_dir) -> None:
+                    try:
+                        with (_d / f"c2_events_{agent_id}.log").open("a", encoding="utf-8") as _f:
+                            _f.write(text + "\n")
+                    except OSError:
+                        pass
+                    # Also feed into the live advisor so it has C2 context
+                    self.post_message(SideSaddleApp.NewLog(text))
+                self._c2_client.start_polling(_write_c2)
+
             self._write(f"[dim]Op: [bold]{op}[/bold]  Watching {log_dir_path}[/dim]  Enter submits · Shift+Enter newline")
 
             resumed = self._analyst.load_session()
@@ -448,7 +463,8 @@ class SideSaddleApp(App[None]):
             for w in self._env_warnings:
                 self._write(f"[bold yellow][WARN][/bold yellow] [yellow]{escape(w)}[/yellow]")
             if self._c2_client:
-                self._write(f"[dim]C2 backend: {escape(self._c2_client._url)}  (push not yet implemented)[/dim]")
+                kind = type(self._c2_client).__name__.replace("Backend", "")
+                self._write(f"[dim]C2: [bold]{kind}[/bold] → {escape(self._c2_client._url)}[/dim]")
             if not _has_auth():
                 self._write("[red]No credentials.[/red] Run [bold]--login[/bold] or set [bold]ANTHROPIC_API_KEY[/bold].")
         except Exception as e:
@@ -457,6 +473,8 @@ class SideSaddleApp(App[None]):
     def on_unmount(self) -> None:
         if hasattr(self, "_watcher"):
             self._watcher.stop()
+        if self._c2_client:
+            self._c2_client.stop_polling()
         self._save_session_silent()
 
     def _save_session_silent(self) -> None:
@@ -598,8 +616,11 @@ class SideSaddleApp(App[None]):
         if not hasattr(self, "_analyst"):
             return
         try:
-            bp, ap = self._analyst.export_csv()
-            self._write(f"[green]Exported:[/green]\n  {bp}\n  {ap}")
+            bp, ap, xp = self._analyst.export_csv()
+            msg = f"[green]Exported:[/green]\n  Beacons:    {bp}\n  Activities: {ap}"
+            if xp:
+                msg += f"\n  Excel:      {xp}"
+            self._write(msg)
         except Exception as e:
             self._write(f"[bold red]\\[ERR][/bold red] [red]{escape(str(e))}[/red]")
 
@@ -789,9 +810,11 @@ def run_batch(log_dir: Path | None, output_dir: Path | None) -> None:
     print("Analyzing…")
     print("\n── Advisory ──")
     print(analyst.analyze_sync(raw))
-    bp, ap = analyst.export_csv()
+    bp, ap, xp = analyst.export_csv()
     print(f"\nExported:\n  Beacons    ({len(analyst.beacons)}): {bp}")
     print(f"  Activities ({len(analyst.activities)}): {ap}")
+    if xp:
+        print(f"  Excel: {xp}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -823,9 +846,8 @@ def main() -> None:
             "  Or set:   SS_OP=op1  (env var)  |  current_op: op1  (config.yaml)"
         )
 
-    # Build C2 client if --c2 given (or c2_url in config)
-    c2_url = args.c2 or cfg("c2_url", None)
-    c2_client = C2Client(c2_url) if c2_url else None
+    # Build C2 client from config (c2: block) or --c2 URL override
+    c2_client = build_c2_client(url_override=args.c2)
 
     env_warnings = check_env()
 

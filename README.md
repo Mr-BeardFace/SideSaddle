@@ -13,7 +13,7 @@ A red team op logger and tactical advisor. Captures terminal sessions at the TTY
 - **AI advisor** — Sonnet-powered chat that tracks your op picture: hosts, credentials found, attack paths, live OPSEC warnings
 - **IOC extraction** — structured CSV export of every executed command with target attribution, execution context, and observable artifacts
 - **Op-scoped logging** — all logs and outputs go to `<root>/<op>/`; multiple ops, no mixing
-- **C2 backend stub** — plumbing for forwarding activities to a teamserver (format TBD — see `core/c2_client.py`)
+- **C2 backend** — Nighthawk console log polling implemented; stubs for Cobalt Strike / Sliver / Havoc push
 
 ---
 
@@ -96,7 +96,7 @@ Key settings:
 ```
 python3 SideSaddle.py --op <name>           # TUI mode
 python3 SideSaddle.py --op <name> --analyze # batch analysis of existing logs
-python3 SideSaddle.py --op <name> --c2 <url> # with C2 backend (stub — not yet implemented)
+python3 SideSaddle.py --op <name> --c2 <url> # override C2 URL (type/auth set in config.yaml)
 python3 SideSaddle.py --login               # subscription auth flow
 ```
 
@@ -155,8 +155,8 @@ function prompt {
 - [x] Op-scoped logging with `--op` flag
 - [x] Per-agent model split (ioc_model / chat_model)
 - [x] Env check on startup
-- [x] C2 backend plumbing (stub)
-- [ ] C2 push format implementation (Cobalt Strike / Havoc / Sliver / generic)
+- [x] C2 backend — Nighthawk log polling
+- [ ] C2 push implementation (Cobalt Strike / Havoc / Sliver / generic)
 - [ ] Prompt caching for API-key path
 - [ ] Web UI / multi-operator support
 

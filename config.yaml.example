@@ -65,10 +65,21 @@ analyze_chunk_size: 40000
 # notes_dir: ~/path/to/notes
 # notes_glob: "*.md,*.txt"
 
-# C2 teamserver URL for activity forwarding (optional).
-# Can also be set with --c2 <url> at runtime.
-# Push format is NOT yet implemented — see core/c2_client.py.
-# c2_url: http://teamserver:8080
+# ── C2 backend (optional) ────────────────────────────────────────────────────
+# Supported types: nighthawk | cobalt_strike | sliver | havoc | generic
+#
+# c2:
+#   type: nighthawk
+#   url: https://teamserver:4443
+#   auth:
+#     username: operator
+#     password: changeme
+#     # token: xxx          # for token-based backends (CS, generic)
+#   poll_seconds: 30        # pull backends (nighthawk) — how often to fetch logs
+#   verify_tls: true        # set false if using a self-signed cert
+#
+# The --c2 <url> CLI flag overrides c2.url at runtime.
+# Cobalt Strike / Sliver / Havoc push format: stub in core/c2_client.py.
 
 # Debug mode — writes raw LLM input/output to output_dir for inspection.
 debug: false

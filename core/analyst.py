@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from core.llm_client import LLMClient, cfg
-from core.c2_client import C2Client
+from core.c2_client import C2Backend as C2Client
 
 _TS_PAT = re.compile(r"### (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) ")
 
@@ -18,13 +18,15 @@ _TS_PAT = re.compile(r"### (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) ")
 @dataclass
 class Beacon:
     beacon_id: str
+    c2_type: str = ""        # NH | Sliver | CS | Havoc | etc.
     first_seen: str = ""
     last_seen: str = ""
-    domains: str = ""
-    port_protocol: str = ""
-    user_context: str = ""
-    process: str = ""
-    user_agent: str = ""
+    hostname: str = ""       # machine the implant runs on
+    user_context: str = ""   # OS user the implant runs as
+    external_ip: str = ""    # internet-facing IP of target
+    internal_ips: str = ""   # comma-separated internal IPs
+    process: str = ""        # hosting process + PID
+    listener: str = ""       # listener / callback name or URL
 
 
 @dataclass
@@ -56,14 +58,16 @@ _ANALYSIS_TOOLS = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "beacon_id":     {"type": "string", "description": "C2-N identifier"},
-                            "first_seen":    {"type": "string"},
-                            "last_seen":     {"type": "string"},
-                            "domains":       {"type": "string", "description": "Victim hostname/domain"},
-                            "port_protocol": {"type": "string", "description": "e.g. 443/HTTPS"},
-                            "user_context":  {"type": "string", "description": "OS user implant runs as"},
-                            "process":       {"type": "string", "description": "Hosting process + PID"},
-                            "user_agent":    {"type": "string"},
+                            "beacon_id":     {"type": "string", "description": "C2-N identifier (e.g. C2-1) or NH clientId short form"},
+                            "c2_type":       {"type": "string", "description": "NH | Sliver | CS | Havoc | unknown"},
+                            "first_seen":    {"type": "string", "description": "ISO timestamp"},
+                            "last_seen":     {"type": "string", "description": "ISO timestamp"},
+                            "hostname":      {"type": "string", "description": "Machine the implant runs on"},
+                            "user_context":  {"type": "string", "description": "OS user the implant runs as"},
+                            "external_ip":   {"type": "string", "description": "Internet-facing IP of target"},
+                            "internal_ips":  {"type": "string", "description": "Comma-separated internal IPs"},
+                            "process":       {"type": "string", "description": "Hosting process name + PID, e.g. notepad.exe (1234)"},
+                            "listener":      {"type": "string", "description": "Listener / callback name or URL"},
                         },
                         "required": ["beacon_id"],
                     },
@@ -77,7 +81,7 @@ _ANALYSIS_TOOLS = [
                             "activity_id":          {"type": "string", "description": "ACT-N identifier"},
                             "beacon_id":            {"type": "string"},
                             "timestamp_utc":        {"type": "string"},
-                            "execution_context":    {"type": "string", "description": "Operator Terminal | SSH > <host> | Proxychains > <host> | C2 | C2 > <host>"},
+                            "execution_context":    {"type": "string", "description": "C2 > HOST | Proxychains > C2 > HOST | <local> (direct, no C2) | SSH > HOST"},
                             "execution_host":       {"type": "string", "description": "Host the command ran ON. Use 'OpStation' for the attack box."},
                             "user_context":         {"type": "string"},
                             "remote_host":          {"type": "string", "description": "Target host if action was directed outward"},
@@ -164,8 +168,9 @@ _IOC_TOOLS = [
                         "type": "object",
                         "properties": {
                             "timestamp_utc":      {"type": "string"},
-                            "execution_context":  {"type": "string", "description": "Operator Terminal | SSH > host | Proxychains > host | C2 > host"},
-                            "execution_host":     {"type": "string", "description": "Machine command ran ON"},
+                            "beacon_id":          {"type": "string", "description": "C2-N or short clientId of the beacon this activity ran through. Empty only for <local> commands."},
+                            "execution_context":  {"type": "string", "description": "C2 > HOST | Proxychains > C2 > HOST | <local> (direct OpStation→target, no C2)"},
+                            "execution_host":     {"type": "string", "description": "Machine command ran ON (the target, not the proxy hop)"},
                             "command_action":     {"type": "string", "description": "Exact command, secrets replaced with <REDACTED>"},
                             "result":             {"type": "string", "description": "One-line result summary"},
                             "observable_artifacts": {"type": "string", "description": "What TARGET system would log: processes spawned on target, inbound connections, files written on target. Max 4, newline-separated. NOT OpStation artifacts."},
@@ -181,7 +186,34 @@ _IOC_TOOLS = [
 
 _IOC_SYSTEM = """\
 You are an IOC extractor for red team operations. Extract every executed command from \
-these raw terminal logs into structured activity records.
+these logs into structured activity records.
+
+LOG SECTIONS — you may receive two sections:
+- Terminal session logs (default): raw operator TTY capture from the attack box.
+- C2 CONSOLE LOGS (=== C2 CONSOLE LOGS ===): beacon metadata + commands.
+  BEACON ARTIFACT BLOCKS (# BEACON … #───) appear once per beacon:
+    fields: c2_type, beacon_id, hostname, user, external_ip, internal_ips,
+            process PID, listener, first_seen, last_seen.
+  BEACON COMMANDS: ### timestamp NH:operator  command  [C2: HOSTNAME\\user]
+    execution_context = "C2 > HOSTNAME", execution_host = HOSTNAME
+
+EXECUTION CONTEXT — use exactly one of:
+- C2 > HOSTNAME       — command sent through a beacon
+- Proxychains > C2 > HOSTNAME — local command routed through beacon's SOCKS proxy
+- <local>             — direct connection from OpStation with no C2 (rare; flag as OPSEC risk)
+
+BEACON CORRELATION:
+- Every activity that ran through a beacon must have beacon_id populated.
+- Derive beacon_id from the # BEACON block (beacon_id field) or from the [C2: HOSTNAME]
+  annotation in the ### header.
+- Proxychains commands: use beacon_id of the beacon whose socks-start preceded them.
+  If multiple beacons are active, match by hostname/subnet from the SOCKS port used.
+
+CROSS-SOURCE CORRELATION:
+- If C2 logs show socks/socks-start/socks5 on a beacon, and terminal logs later show
+  proxychains on the same or downstream subnet: those proxychains commands ran through
+  that beacon. Set execution_context = "Proxychains > C2 > HOSTNAME" and beacon_id
+  to that beacon. Use timestamps — proxychains must come AFTER the socks-start.
 
 SKIP — do NOT record:
 - Local tool setup: pip install, apt install, apt-get, brew, npm, gem, cargo, go install
@@ -195,6 +227,7 @@ RECORD — always log:
 - Credential use or discovery
 - File operations on target systems
 - Privilege escalation attempts
+- C2 beacon commands (from C2 CONSOLE LOGS section)
 
 REDACTION — replace inline secrets in command_action with <REDACTED>:
 - Passwords in flags: -p password → -p <REDACTED>
@@ -227,14 +260,35 @@ _ANALYSIS_SYSTEM = """\
 You are SideSaddle, a red team operations logger. Analyze raw terminal session log output \
 and maintain structured records for operator awareness and SOC handoff.
 
-EXECUTION CONTEXTS — commands may come from any of these with NO C2 beacon involved:
-- Operator Terminal: commands run directly on the attack box (Kali/jump box)
-- SSH > <host>: commands on a target via SSH
-- Proxychains > <host>: commands via proxy pivot
-- C2 / C2 > <host>: commands via an implant
+EXECUTION CONTEXTS — use exactly one of:
+- C2 > HOST: command sent through a beacon (host from [C2: ...] annotation)
+- Proxychains > C2 > HOST: local command routed through a beacon's SOCKS proxy
+- <local>: direct OpStation→target with no C2 (rare; always note as OPSEC risk)
+- SSH > HOST: SSH session (set beacon_id if the SSH connection itself went through a beacon)
+Populate beacon_id on every activity that touched a C2 beacon.
+
+LOG SECTIONS — you may receive two sections:
+  Terminal session logs: raw operator TTY capture.
+  === C2 CONSOLE LOGS ===: beacon metadata and commands.
+
+  BEACON ARTIFACT BLOCKS (# BEACON … #───) appear once per beacon and contain:
+    c2_type, beacon_id, hostname, user, external_ip, internal_ips, process PID,
+    listener name, first_seen, last_seen.
+  Extract these into beacon records with all fields populated.
+
+  BEACON COMMANDS follow beacon blocks:
+    ### timestamp NH:operator  command  [C2: HOSTNAME\\user]
+    execution_context = "C2 > HOSTNAME", execution_host = HOSTNAME
+
+CROSS-SOURCE CORRELATION:
+  When C2 logs show a SOCKS listener opened (socks, socks-start, socks5) and terminal
+  logs later show proxychains on the same or downstream subnet, the proxychains
+  commands are routing through that beacon. Set execution_context to
+  "Proxychains > C2 > HOSTNAME". Use timestamps to establish ordering.
 
 Call analyze_session ONCE with all findings populated:
-- beacons: C2 implants found (empty array if none)
+- beacons: C2 implants found (empty array if none); for each include c2_type, hostname,
+  user_context, external_ip, internal_ips, process, listener, first_seen, last_seen
 - activities: operational commands only (see SKIP LIST below)
 - op_picture: full living knowledge base — previously known info plus new findings
 - advisory: opsec warnings, tactical next steps, one-sentence state
@@ -399,6 +453,31 @@ class Analyst:
                 text = "".join(filtered)
             if text.strip():
                 parts.append(text)
+        c2_files = sorted(self._log_dir.glob("c2_events_*.log"))
+        c2_parts: list[str] = []
+        for c2_log in c2_files:
+            try:
+                c2_text = c2_log.read_text(errors="replace")
+            except OSError:
+                continue
+            if since is not None:
+                filtered_c2: list[str] = []
+                include = False
+                for line in c2_text.splitlines(keepends=True):
+                    m = _TS_PAT.match(line)
+                    if m:
+                        try:
+                            include = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S") >= since
+                        except ValueError:
+                            pass
+                    if include:
+                        filtered_c2.append(line)
+                c2_text = "".join(filtered_c2)
+            if c2_text.strip():
+                c2_parts.append(c2_text.strip())
+        if c2_parts:
+            parts.append("\n=== C2 CONSOLE LOGS ===\n" + "\n\n".join(c2_parts))
+
         if self._notes_dir and self._notes_dir.is_dir():
             globs = cfg("notes_glob", "*.md,*.txt").split(",")
             note_parts: list[str] = []
@@ -448,20 +527,25 @@ class Analyst:
                     collected.extend(acts)
                     n += len(acts)
             if collected:
-                path = self._write_ioc_csv(collected, since)
-                path_str = str(path)
+                act_path, bcn_path, xlsx_path = self._write_ioc_outputs(collected, since)
             else:
-                path_str = ""
+                act_path = bcn_path = xlsx_path = None
             if stopped:
                 self.on_status(f"IOC log stopped — {len(collected)} activities")
                 msg = f"IOC log stopped. {len(collected)} activities extracted."
-                if path_str:
-                    msg += f"\nPartial export: {path_str}"
+                if act_path:
+                    msg += f"\nPartial: {act_path}"
                 self.on_response(msg)
             else:
                 self._last_ioc_time = datetime.now()
-                self.on_status(f"IOC log: {len(collected)} activities → {Path(path_str).name}")
-                self.on_response(f"IOC log saved: {path_str}\n{len(collected)} activities extracted.")
+                lines = [f"IOC log: {len(collected)} activities"]
+                if act_path:
+                    lines.append(f"  Activities CSV: {act_path}")
+                    lines.append(f"  Beacons CSV:    {bcn_path}")
+                if xlsx_path:
+                    lines.append(f"  Excel:          {xlsx_path}")
+                self.on_status(f"IOC log: {len(collected)} activities")
+                self.on_response("\n".join(lines))
         except Exception as e:
             self.on_error(str(e))
             self.on_status("Error")
@@ -481,6 +565,7 @@ class Analyst:
                 for i, a in enumerate(inp.get("activities") or []):
                     acts.append(Activity(
                         activity_id=f"ACT-{start_n + i:04d}",
+                        beacon_id=a.get("beacon_id", ""),
                         timestamp_utc=a.get("timestamp_utc", ""),
                         execution_context=a.get("execution_context", ""),
                         execution_host=a.get("execution_host", ""),
@@ -492,8 +577,8 @@ class Analyst:
         return []
 
     _IOC_FIELDS = [
-        "activity_id", "timestamp_utc", "execution_context", "execution_host",
-        "command_action", "result", "observable_artifacts",
+        "activity_id", "beacon_id", "timestamp_utc", "execution_context",
+        "execution_host", "command_action", "result", "observable_artifacts",
     ]
 
     def _append_ioc_rows(self, activities: list[Activity]) -> None:
@@ -510,16 +595,78 @@ class Analyst:
         except Exception:
             pass
 
-    def _write_ioc_csv(self, activities: list[Activity], since: "datetime | None") -> Path:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _BEACON_IOC_FIELDS = [
+        "beacon_id", "c2_type", "hostname", "user", "external_ip",
+        "internal_ips", "process", "listener", "first_seen", "last_seen",
+    ]
+
+    def _parse_beacon_blocks(self) -> list[dict]:
+        """Parse # BEACON artifact blocks from all c2_events_*.log files."""
+        if not self._log_dir or not self._log_dir.is_dir():
+            return []
+        seen: dict[str, dict] = {}
+        block_re = re.compile(r'# BEACON ─+\n(.*?)# ─+', re.DOTALL)
+        field_re = re.compile(r'#\s+([\w_]+):\s*(.*)')
+        for path in sorted(self._log_dir.glob("c2_events_*.log")):
+            try:
+                text = path.read_text(errors="replace")
+            except OSError:
+                continue
+            for match in block_re.finditer(text):
+                b: dict[str, str] = {}
+                for line in match.group(1).splitlines():
+                    m = field_re.match(line.strip())
+                    if m:
+                        b[m.group(1).strip()] = m.group(2).strip()
+                bid = b.get("beacon_id", "")
+                if bid:
+                    seen[bid] = b  # last-seen block wins (freshest last_seen)
+        return list(seen.values())
+
+    def _write_ioc_outputs(
+        self, activities: list[Activity], since: "datetime | None"
+    ) -> tuple[Path, Path, Path | None]:
+        """Write activities CSV, beacons CSV, and (if openpyxl available) xlsx.
+        Returns (activities_path, beacons_path, xlsx_path_or_None).
+        """
+        ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
         suffix = f"_from_{since.strftime('%Y%m%d')}" if since else ""
-        path = self._output_dir / f"ioc_log{suffix}_{ts}.csv"
-        with open(path, "w", newline="", encoding="utf-8") as f:
+        base   = self._output_dir / f"ioc{suffix}_{ts}"
+
+        act_path = Path(str(base) + "_activities.csv")
+        with open(act_path, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=self._IOC_FIELDS)
             w.writeheader()
             for a in activities:
                 w.writerow({k: getattr(a, k, "") for k in self._IOC_FIELDS})
-        return path
+
+        beacons  = self._parse_beacon_blocks()
+        bcn_path = Path(str(base) + "_beacons.csv")
+        with open(bcn_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=self._BEACON_IOC_FIELDS)
+            w.writeheader()
+            for b in beacons:
+                w.writerow({k: b.get(k, "") for k in self._BEACON_IOC_FIELDS})
+
+        xlsx_path: Path | None = None
+        try:
+            import openpyxl
+            wb  = openpyxl.Workbook()
+            ws_b = wb.active
+            ws_b.title = "Beacons"
+            ws_b.append(self._BEACON_IOC_FIELDS)
+            for b in beacons:
+                ws_b.append([b.get(k, "") for k in self._BEACON_IOC_FIELDS])
+            ws_a = wb.create_sheet("Activities")
+            ws_a.append(self._IOC_FIELDS)
+            for a in activities:
+                ws_a.append([getattr(a, k, "") for k in self._IOC_FIELDS])
+            xlsx_path = Path(str(base) + ".xlsx")
+            wb.save(str(xlsx_path))
+        except ImportError:
+            pass
+
+        return act_path, bcn_path, xlsx_path
 
     def _load_screenshot_blocks(self) -> list[dict]:
         """Load image files from notes_dir as base64 vision blocks."""
@@ -579,21 +726,44 @@ class Analyst:
         except Exception as e:
             return f"Could not load session: {e}"
 
-    def export_csv(self) -> tuple[Path, Path]:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    def export_csv(self) -> tuple[Path, Path, Path | None]:
+        ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bcn_fields = list(Beacon.__dataclass_fields__.keys())
+        act_fields = list(Activity.__dataclass_fields__.keys())
+
         bp = self._output_dir / f"beacons_{ts}.csv"
         with open(bp, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=list(Beacon.__dataclass_fields__.keys()))
+            w = csv.DictWriter(f, fieldnames=bcn_fields)
             w.writeheader()
             for b in self.beacons.values():
                 w.writerow(asdict(b))
+
         ap = self._output_dir / f"activities_{ts}.csv"
         with open(ap, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=list(Activity.__dataclass_fields__.keys()))
+            w = csv.DictWriter(f, fieldnames=act_fields)
             w.writeheader()
             for a in self.activities:
                 w.writerow(asdict(a))
-        return bp, ap
+
+        xp: Path | None = None
+        try:
+            import openpyxl
+            wb   = openpyxl.Workbook()
+            ws_b = wb.active
+            ws_b.title = "Beacons"
+            ws_b.append(bcn_fields)
+            for b in self.beacons.values():
+                ws_b.append([getattr(b, k, "") for k in bcn_fields])
+            ws_a = wb.create_sheet("Activities")
+            ws_a.append(act_fields)
+            for a in self.activities:
+                ws_a.append([getattr(a, k, "") for k in act_fields])
+            xp = self._output_dir / f"session_{ts}.xlsx"
+            wb.save(str(xp))
+        except ImportError:
+            pass
+
+        return bp, ap, xp
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -611,8 +781,12 @@ class Analyst:
         if self.beacons:
             parts.append("BEACONS:")
             for b in self.beacons.values():
-                parts.append(f"  {b.beacon_id}: {b.user_context or '?'} on {b.domains or '?'} via {b.process or '?'}"
-                             + (f"  [{b.port_protocol}]" if b.port_protocol else ""))
+                line = f"  {b.beacon_id} [{b.c2_type or '?'}]: {b.user_context or '?'} on {b.hostname or '?'}"
+                if b.external_ip:  line += f"  ext:{b.external_ip}"
+                if b.internal_ips: line += f"  int:{b.internal_ips}"
+                if b.process:      line += f"  proc:{b.process}"
+                if b.listener:     line += f"  → {b.listener}"
+                parts.append(line)
         if pic.get("access"):
             parts.append("ACCESS INVENTORY:")
             for a in pic["access"]:
