@@ -289,6 +289,30 @@ _CHAT_TOOLS = [
             "required": ["path", "pattern"],
         },
     },
+    {
+        "name": "write_file",
+        "description": "Write (create or overwrite) a file inside the configured working_dir. Fails if working_dir is not set or the path resolves outside it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":    {"type": "string", "description": "Absolute or ~ path to write"},
+                "content": {"type": "string", "description": "Full file content to write"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "append_file",
+        "description": "Append text to a file inside the configured working_dir. Creates the file if it doesn't exist. Fails if working_dir is not set or the path resolves outside it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":    {"type": "string", "description": "Absolute or ~ path to append to"},
+                "content": {"type": "string", "description": "Text to append"},
+            },
+            "required": ["path", "content"],
+        },
+    },
 ]
 
 
@@ -1062,6 +1086,10 @@ class Analyst:
                         result = _find_files(i.get("directory", ""), i.get("pattern", "*"), i.get("max_results", 50))
                     elif tc.name == "grep_file":
                         result = _grep_file(i.get("path", ""), i.get("pattern", ""), i.get("max_matches", 50))
+                    elif tc.name == "write_file":
+                        result = _write_file(i.get("path", ""), i.get("content", ""))
+                    elif tc.name == "append_file":
+                        result = _append_file(i.get("path", ""), i.get("content", ""))
                     else:
                         result = "unknown tool"
                     results.append({"type": "tool_result", "tool_use_id": tc.id, "content": result})
@@ -1137,3 +1165,45 @@ def _grep_file(path: str, pattern: str, max_matches: int = 50) -> str:
         return "\n".join(out) if out else "(no matches)"
     except Exception as e:
         return f"Error searching {path}: {e}"
+
+
+def _check_write_allowed(path: str) -> "tuple[Path, str | None]":
+    """Return (resolved_path, error_string). error_string is None if write is allowed."""
+    from core.llm_client import cfg as _cfg
+    wd = _cfg("working_dir", "")
+    if not wd:
+        return Path(path), "Write blocked: working_dir is not set. Use /config set working_dir <path> to enable writes."
+    try:
+        target = Path(path).expanduser().resolve()
+        base   = Path(wd).expanduser().resolve()
+        target.relative_to(base)  # raises ValueError if outside
+        return target, None
+    except ValueError:
+        return Path(path), f"Write blocked: {path} is outside working_dir ({wd})."
+    except Exception as e:
+        return Path(path), f"Write blocked: {e}"
+
+
+def _write_file(path: str, content: str) -> str:
+    target, err = _check_write_allowed(path)
+    if err:
+        return err
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return f"Written {len(content)} bytes to {target}"
+    except Exception as e:
+        return f"Error writing {path}: {e}"
+
+
+def _append_file(path: str, content: str) -> str:
+    target, err = _check_write_allowed(path)
+    if err:
+        return err
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as f:
+            f.write(content)
+        return f"Appended {len(content)} bytes to {target}"
+    except Exception as e:
+        return f"Error appending to {path}: {e}"

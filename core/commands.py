@@ -106,6 +106,7 @@ _CONFIG_KEYS: list[tuple[str, str, str]] = [
     ("log_glob",            "str",    "Glob pattern for log files (default: raw_*.log; legacy: session_*.log)"),
     ("notes_dir",           "str",    "Path to external analyst notes folder"),
     ("notes_glob",          "str",    "Glob patterns for notes files (comma-separated)"),
+    ("working_dir",         "str",    "Directory the advisor may write files into (unset = no writes allowed)"),
 ]
 _KEY_NAMES:  tuple[str, ...] = tuple(k for k, _, _ in _CONFIG_KEYS)
 _BOOL_KEYS:  frozenset[str]  = frozenset(k for k, t, _ in _CONFIG_KEYS if t == "bool")
