@@ -302,6 +302,17 @@ _CHAT_TOOLS = [
         },
     },
     {
+        "name": "fetch_url",
+        "description": "Fetch the content of a URL from the public internet to read an article, advisory, or documentation page. Only use URLs returned by web_search. Never use this to contact target systems — private/internal IPs are automatically blocked.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Full URL to fetch (http/https only)"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
         "name": "write_file",
         "description": "Write (create or overwrite) a file inside the configured working_dir. Fails if working_dir is not set or the path resolves outside it.",
         "input_schema": {
@@ -1102,6 +1113,8 @@ class Analyst:
                         result = _write_file(i.get("path", ""), i.get("content", ""))
                     elif tc.name == "append_file":
                         result = _append_file(i.get("path", ""), i.get("content", ""))
+                    elif tc.name == "fetch_url":
+                        result = _fetch_url(i.get("url", ""))
                     elif tc.name == "web_search":
                         result = _web_search(i.get("query", ""), i.get("max_results", 5))
                     else:
@@ -1221,6 +1234,44 @@ def _append_file(path: str, content: str) -> str:
         return f"Appended {len(content)} bytes to {target}"
     except Exception as e:
         return f"Error appending to {path}: {e}"
+
+
+def _fetch_url(url: str) -> str:
+    import urllib.request, urllib.parse, ipaddress, socket, re as _re
+    from core.llm_client import cfg as _cfg
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return "Blocked: only http/https URLs are allowed."
+        hostname = parsed.hostname or ""
+    except Exception as e:
+        return f"Invalid URL: {e}"
+    # Block private / loopback / reserved addresses
+    try:
+        for info in socket.getaddrinfo(hostname, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return f"Blocked: {hostname} resolves to a private/internal address ({ip})."
+    except socket.gaierror as e:
+        return f"DNS resolution failed for {hostname}: {e}"
+    # Block configured target hosts
+    blocked = _cfg("blocked_hosts", "")
+    if blocked:
+        for pattern in (p.strip() for p in blocked.split(",") if p.strip()):
+            if hostname == pattern or hostname.endswith("." + pattern):
+                return f"Blocked: {hostname} matches blocked_hosts entry '{pattern}'."
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read(65536).decode("utf-8", errors="replace")
+        # Strip tags and collapse whitespace for readable output
+        text = _re.sub(r"<[^>]+>", " ", raw)
+        text = _re.sub(r"\s+", " ", text).strip()
+        if len(text) > 4000:
+            text = text[:4000] + "\n[... truncated]"
+        return text
+    except Exception as e:
+        return f"Error fetching {url}: {e}"
 
 
 def _web_search(query: str, max_results: int = 5) -> str:

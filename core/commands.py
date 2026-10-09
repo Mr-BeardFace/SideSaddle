@@ -108,6 +108,7 @@ _CONFIG_KEYS: list[tuple[str, str, str]] = [
     ("notes_glob",          "str",    "Glob patterns for notes files (comma-separated)"),
     ("working_dir",         "str",    "Directory the advisor may write files into (unset = no writes allowed)"),
     ("brave_api_key",       "str",    "Brave Search API key for web search tool (free tier at api.search.brave.com)"),
+    ("blocked_hosts",       "str",    "Comma-separated hostnames/IPs the fetch_url tool may never contact (add known targets here)"),
 ]
 _KEY_NAMES:  tuple[str, ...] = tuple(k for k, _, _ in _CONFIG_KEYS)
 _BOOL_KEYS:  frozenset[str]  = frozenset(k for k, t, _ in _CONFIG_KEYS if t == "bool")
