@@ -729,7 +729,7 @@ def check_env() -> list[str]:
     zshrc = Path.home() / ".zshrc"
     if zshrc.exists():
         try:
-            if "SideSaddle session logging" not in zshrc.read_text(errors="replace"):
+            if "SideSaddle" not in zshrc.read_text(errors="replace"):
                 warnings.append(
                     "WARNING: ~/.zshrc does not contain the SideSaddle logging block.\n"
                     "  Run configure.sh to set up automatic session capture."
