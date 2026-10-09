@@ -39,20 +39,12 @@ echo "[+] Evil-WinRM prompt script → ${EW_SCRIPTS}/prompt.ps1"
 # ── Zsh configuration block ───────────────────────────────────────────────────
 
 ZSHRC="${HOME}/.zshrc"
-MARKER="# === SideSaddle session logging v6 ==="
+MARKER="# === SideSaddle ==="
 
-# Remove any older SideSaddle blocks so we can reinstall cleanly
-for OLD in "# === SideSaddle session logging ===" \
-           "# === SideSaddle session logging v2 ===" \
-           "# === SideSaddle session logging v3 ===" \
-           "# === SideSaddle session logging v4 ===" \
-           "# === SideSaddle session logging v5 ===" \
-           "# === SideSaddle session logging v6 ==="; do
-    if grep -qF "${OLD}" "${ZSHRC}" 2>/dev/null; then
-        sed -i "/^${OLD}/,/^# === end SideSaddle ===/d" "${ZSHRC}"
-        echo "[~] Removed old SideSaddle block (${OLD})"
-    fi
-done
+if grep -qF "${MARKER}" "${ZSHRC}" 2>/dev/null; then
+    echo "[~] Zshrc already configured — remove the '${MARKER}' block and re-run to update"
+    exit 0
+fi
 
 cat >> "${ZSHRC}" << ZSHBLOCK
 
@@ -73,7 +65,7 @@ _ss_skip() {
 
 _ss_preexec() {
     _ss_skip "\$1" && return
-    printf '\\n\\033[8m### %s %s\$%s %s\\033[0m\\n' \\
+    printf '### %s %s\$%s %s\r\033[2K' \\
         "\$(date +'%Y-%m-%d %H:%M:%S')" "\${USER}" "\${PWD}" "\$1"
 }
 
