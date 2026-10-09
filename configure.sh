@@ -39,10 +39,17 @@ echo "[+] Evil-WinRM prompt script → ${EW_SCRIPTS}/prompt.ps1"
 # ── Zsh configuration block ───────────────────────────────────────────────────
 
 ZSHRC="${HOME}/.zshrc"
-MARKER="# === SideSaddle session logging ==="
+OLD_MARKER="# === SideSaddle session logging ==="
+MARKER="# === SideSaddle session logging v2 ==="
+
+# Remove old block if present so we can reinstall with the new version
+if grep -qF "${OLD_MARKER}" "${ZSHRC}" 2>/dev/null; then
+    sed -i '/^# === SideSaddle session logging ===/,/^# === end SideSaddle ===/d' "${ZSHRC}"
+    echo "[~] Removed old SideSaddle block — reinstalling"
+fi
 
 if grep -qF "${MARKER}" "${ZSHRC}" 2>/dev/null; then
-    echo "[~] Zshrc already configured — skipping (remove ${MARKER} block to re-run)"
+    echo "[~] Zshrc already configured (v2) — skipping (remove ${MARKER} block to re-run)"
 else
     cat >> "${ZSHRC}" << ZSHBLOCK
 
@@ -63,9 +70,10 @@ _ss_skip() {
 
 _ss_preexec() {
     _ss_skip "\$1" && return
-    # Write ### marker to stdout — captured by script
+    [[ -z "\${_SS_CURRENT_LOG:-}" ]] && return
+    # Write ### marker directly to the log file — keeps terminal output clean
     printf '\\n### %s %s\$%s %s\\n' \\
-        "\$(date +'%Y-%m-%d %H:%M:%S')" "\${USER}" "\${PWD}" "\$1"
+        "\$(date +'%Y-%m-%d %H:%M:%S')" "\${USER}" "\${PWD}" "\$1" >> "\${_SS_CURRENT_LOG}"
 }
 
 autoload -Uz add-zsh-hook
@@ -88,7 +96,8 @@ if [[ -z "\${SCRIPT_LOG_ACTIVE}" && -t 0 ]]; then
         export SCRIPT_LOG_ACTIVE=1
         _ss_dir="\${_SS_ROOT}/\${SS_OP}"
         mkdir -p "\${_ss_dir}"
-        exec script -q -f "\${_ss_dir}/raw_\$(date +%Y%m%d_%H%M%S)_\$\$.log"
+        export _SS_CURRENT_LOG="\${_ss_dir}/raw_\$(date +%Y%m%d_%H%M%S)_\$\$.log"
+        exec script -q -f "\${_SS_CURRENT_LOG}"
     fi
 fi
 # === end SideSaddle ===
