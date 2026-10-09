@@ -65,7 +65,7 @@ _ss_skip() {
 
 _ss_preexec() {
     _ss_skip "\$1" && return
-    printf '### %s %s\$%s %s\r\033[2K' \\
+    printf '\\n### %s %s\$%s %s\\n' \\
         "\$(date +'%Y-%m-%d %H:%M:%S')" "\${USER}" "\${PWD}" "\$1"
 }
 
