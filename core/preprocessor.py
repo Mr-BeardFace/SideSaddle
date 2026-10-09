@@ -13,6 +13,8 @@ _ANSI     = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-9;]*[ -/]*[@-~])')
 _TUI_CHAR = re.compile(r'\x1b\[(?:2J|H|\d+;\d+H)')
 _PROMPT   = re.compile(r'^(?:\*\S+\*\s+)?(?:PS\s+)?[\w:\\/~.\[\]-]{2,}[>#$%]\s*$', re.MULTILINE)
 _BLOCK    = re.compile(r'(?m)(?=^### )')
+# Matches any prompt line (bare or with command) — used to strip trailing echo from section bodies
+_PROMPT_LINE = re.compile(r'^(?:\*\S+\*\s+)?(?:PS\s+)?[\w:\\/~.\[\]-]{2,}[>#$%]\s*')
 
 # Extract just the command part from a ### header line
 _HEADER_CMD = re.compile(r'^### \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+\s+(.+)$')
@@ -89,6 +91,18 @@ def _redact(text: str) -> str:
     return _CREDS.sub('<REDACTED>', text)
 
 
+def _strip_trailing_echo(body: str) -> str:
+    """Remove trailing blank lines and prompt-echo lines from a section body."""
+    lines = body.splitlines(keepends=True)
+    while lines:
+        last = lines[-1].rstrip('\r\n')
+        if not last or _PROMPT_LINE.match(last):
+            lines.pop()
+        else:
+            break
+    return ''.join(lines)
+
+
 def _truncate(lines: list[str], max_lines: int) -> list[str]:
     if len(lines) <= max_lines:
         return lines
@@ -127,7 +141,7 @@ def preprocess(
         if not header_clean.startswith('### '):
             continue
         annotation   = _annotate(header_clean)
-        body_clean   = _strip_ansi(body_raw)
+        body_clean   = _strip_trailing_echo(_strip_ansi(body_raw))
 
         # ── IOC log ──────────────────────────────────────────────────────────
         if _is_interactive(body_clean):
