@@ -846,6 +846,14 @@ def main() -> None:
             "  Or set:   current_op: op1  in config.yaml"
         )
 
+    # Write op to state file so new terminals log to the right op dir
+    _state = Path.home() / ".config" / "sidesaddle" / "current_op"
+    try:
+        _state.parent.mkdir(parents=True, exist_ok=True)
+        _state.write_text(op)
+    except OSError:
+        pass
+
     # Build C2 client from config (c2: block) or --c2 URL override
     c2_client = build_c2_client(url_override=args.c2)
 

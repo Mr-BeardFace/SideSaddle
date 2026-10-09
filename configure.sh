@@ -39,12 +39,13 @@ echo "[+] Evil-WinRM prompt script → ${EW_SCRIPTS}/prompt.ps1"
 # ── Zsh configuration block ───────────────────────────────────────────────────
 
 ZSHRC="${HOME}/.zshrc"
-MARKER="# === SideSaddle session logging v3 ==="
+MARKER="# === SideSaddle session logging v4 ==="
 
 # Remove any older SideSaddle blocks so we can reinstall cleanly
 for OLD in "# === SideSaddle session logging ===" \
            "# === SideSaddle session logging v2 ===" \
-           "# === SideSaddle session logging v3 ==="; do
+           "# === SideSaddle session logging v3 ===" \
+           "# === SideSaddle session logging v4 ==="; do
     if grep -qF "${OLD}" "${ZSHRC}" 2>/dev/null; then
         sed -i "/^${OLD}/,/^# === end SideSaddle ===/d" "${ZSHRC}"
         echo "[~] Removed old SideSaddle block (${OLD})"
@@ -81,8 +82,14 @@ add-zsh-hook preexec _ss_preexec
 # Auto-start script session for every interactive terminal
 if [[ -z "\${SCRIPT_LOG_ACTIVE}" && -t 0 ]]; then
     export SCRIPT_LOG_ACTIVE=1
-    mkdir -p "\${_SS_ROOT}"
-    export _SS_CURRENT_LOG="\${_SS_ROOT}/raw_\$(date +%Y%m%d_%H%M%S)_\$\$.log"
+    _ss_op="\$(cat "\${HOME}/.config/sidesaddle/current_op" 2>/dev/null)"
+    if [[ -n "\${_ss_op}" ]]; then
+        _ss_log_dir="\${_SS_ROOT}/\${_ss_op}"
+    else
+        _ss_log_dir="\${_SS_ROOT}"
+    fi
+    mkdir -p "\${_ss_log_dir}"
+    export _SS_CURRENT_LOG="\${_ss_log_dir}/raw_\$(date +%Y%m%d_%H%M%S)_\$\$.log"
     exec script -q -f "\${_SS_CURRENT_LOG}"
 fi
 # === end SideSaddle ===

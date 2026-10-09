@@ -14,18 +14,27 @@ from core.llm_client import cfg, set_cfg, fetch_models
 
 # ── Op resolution ─────────────────────────────────────────────────────────────
 
+_STATE_FILE = Path.home() / ".config" / "sidesaddle" / "current_op"
+
+
 def resolve_op() -> tuple[str | None, Path | None, Path | None]:
     """Return (op_name, log_dir, output_dir) or (None, None, None) if no op set.
 
-    Priority: SS_OP env var > current_op config.
-    Logs are always read from log_root (flat); outputs go to output_root/op.
+    Priority: SS_OP env var > state file (written by SideSaddle on startup) > current_op config.
     """
-    op = os.environ.get("SS_OP") or cfg("current_op", "")
+    op = os.environ.get("SS_OP") or ""
+    if not op:
+        try:
+            op = _STATE_FILE.read_text().strip()
+        except OSError:
+            pass
+    if not op:
+        op = cfg("current_op", "")
     if not op:
         return None, None, None
     log_root    = Path(cfg("log_root",    "~/.local/share/sidesaddle")).expanduser()
     output_root = Path(cfg("output_root", "~/sidesaddle-output")).expanduser()
-    return op, log_root, output_root / op
+    return op, log_root / op, output_root / op
 
 
 # ── Command registry ──────────────────────────────────────────────────────────
