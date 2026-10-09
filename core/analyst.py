@@ -241,14 +241,52 @@ No advisory, no op state analysis — extraction only.
 _CHAT_TOOLS = [
     {
         "name": "read_file",
-        "description": "Read a file from the operator's filesystem to help answer their question. Use when the operator asks about a file's contents or wants you to analyze something on disk.",
+        "description": "Read a file from the operator's filesystem. Use when the operator asks about file contents or wants you to analyze something on disk.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "path":      {"type": "string", "description": "Absolute path to the file"},
+                "path":      {"type": "string",  "description": "Absolute or ~ path to the file"},
                 "max_lines": {"type": "integer", "description": "Max lines to return (default 150)"},
             },
             "required": ["path"],
+        },
+    },
+    {
+        "name": "list_directory",
+        "description": "List files and directories at a path. Supports glob patterns (e.g. *.txt). Use to explore the filesystem.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":    {"type": "string", "description": "Directory path to list"},
+                "pattern": {"type": "string", "description": "Glob pattern to filter entries (default: *)"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "find_files",
+        "description": "Recursively find files matching a glob pattern under a directory (like find -name).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "directory":   {"type": "string",  "description": "Root directory to search from"},
+                "pattern":     {"type": "string",  "description": "Glob pattern, e.g. '*.conf' or 'id_rsa*'"},
+                "max_results": {"type": "integer", "description": "Cap results (default 50)"},
+            },
+            "required": ["directory", "pattern"],
+        },
+    },
+    {
+        "name": "grep_file",
+        "description": "Search for a regex pattern inside a file and return matching lines with line numbers.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path":        {"type": "string",  "description": "File to search"},
+                "pattern":     {"type": "string",  "description": "Regex or literal string to search for"},
+                "max_matches": {"type": "integer", "description": "Cap matches returned (default 50)"},
+            },
+            "required": ["path", "pattern"],
         },
     },
 ]
@@ -1015,8 +1053,15 @@ class Analyst:
                 messages.append({"role": "assistant", "content": resp.content})
                 results = []
                 for tc in tool_calls:
+                    i = tc.input
                     if tc.name == "read_file":
-                        result = _read_file(tc.input.get("path", ""), tc.input.get("max_lines", 150))
+                        result = _read_file(i.get("path", ""), i.get("max_lines", 150))
+                    elif tc.name == "list_directory":
+                        result = _list_directory(i.get("path", ""), i.get("pattern", "*"))
+                    elif tc.name == "find_files":
+                        result = _find_files(i.get("directory", ""), i.get("pattern", "*"), i.get("max_results", 50))
+                    elif tc.name == "grep_file":
+                        result = _grep_file(i.get("path", ""), i.get("pattern", ""), i.get("max_matches", 50))
                     else:
                         result = "unknown tool"
                     results.append({"type": "tool_result", "tool_use_id": tc.id, "content": result})
@@ -1040,8 +1085,55 @@ def _read_file(path: str, max_lines: int = 150) -> str:
         p = Path(path).expanduser()
         lines = p.read_text(errors="replace").splitlines()
         if len(lines) > max_lines:
-            content = "\n".join(lines[:max_lines])
-            return f"{content}\n[... {len(lines) - max_lines} more lines truncated]"
+            return "\n".join(lines[:max_lines]) + f"\n[... {len(lines) - max_lines} more lines truncated]"
         return "\n".join(lines)
     except Exception as e:
         return f"Error reading {path}: {e}"
+
+
+def _list_directory(path: str, pattern: str = "*") -> str:
+    try:
+        p = Path(path).expanduser()
+        entries = sorted(p.glob(pattern))
+        lines = []
+        for e in entries[:200]:
+            try:
+                size = e.stat().st_size
+            except OSError:
+                size = 0
+            lines.append(f"{'d' if e.is_dir() else 'f'}  {size:>10}  {e.name}")
+        if len(entries) > 200:
+            lines.append(f"[... {len(entries) - 200} more entries]")
+        return "\n".join(lines) if lines else "(empty)"
+    except Exception as e:
+        return f"Error listing {path}: {e}"
+
+
+def _find_files(directory: str, pattern: str, max_results: int = 50) -> str:
+    try:
+        p = Path(directory).expanduser()
+        results = sorted(p.rglob(pattern))[:max_results]
+        lines = [str(r) for r in results]
+        if len(results) == max_results:
+            lines.append(f"[results capped at {max_results}]")
+        return "\n".join(lines) if lines else "(no matches)"
+    except Exception as e:
+        return f"Error finding files: {e}"
+
+
+def _grep_file(path: str, pattern: str, max_matches: int = 50) -> str:
+    import re as _re
+    try:
+        p = Path(path).expanduser()
+        lines = p.read_text(errors="replace").splitlines()
+        try:
+            rx = _re.compile(pattern, _re.IGNORECASE)
+        except _re.error:
+            rx = _re.compile(_re.escape(pattern), _re.IGNORECASE)
+        matches = [(i + 1, line) for i, line in enumerate(lines) if rx.search(line)]
+        out = [f"{n:6}: {line}" for n, line in matches[:max_matches]]
+        if len(matches) > max_matches:
+            out.append(f"[... {len(matches) - max_matches} more matches]")
+        return "\n".join(out) if out else "(no matches)"
+    except Exception as e:
+        return f"Error searching {path}: {e}"

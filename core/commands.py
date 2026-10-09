@@ -166,7 +166,7 @@ def parse(text: str) -> tuple[str, list[str]] | None:
     for path in sorted(_COMMAND_PATHS, key=len, reverse=True):
         if lower == path or lower.startswith(path + " "):
             return path, text[len(path):].strip().split() if text[len(path):].strip() else []
-    return text.split()[0], []
+    return None
 
 
 def best_suggestion(value: str) -> str | None:
