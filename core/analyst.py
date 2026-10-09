@@ -1114,7 +1114,19 @@ class Analyst:
                     elif tc.name == "append_file":
                         result = _append_file(i.get("path", ""), i.get("content", ""))
                     elif tc.name == "fetch_url":
-                        result = _fetch_url(i.get("url", ""))
+                        # Build known-targets set from session beacons and activities
+                        _targets: set[str] = set()
+                        for _b in self.beacons:
+                            for _v in (_b.hostname, _b.external_ip):
+                                if _v:
+                                    _targets.add(_v.strip())
+                            for _ip in _b.internal_ips.split(","):
+                                if _ip.strip():
+                                    _targets.add(_ip.strip())
+                        for _a in self.activities:
+                            if _a.execution_host and _a.execution_host != "OpStation":
+                                _targets.add(_a.execution_host.strip())
+                        result = _fetch_url(i.get("url", ""), _targets)
                     elif tc.name == "web_search":
                         result = _web_search(i.get("query", ""), i.get("max_results", 5))
                     else:
@@ -1236,7 +1248,7 @@ def _append_file(path: str, content: str) -> str:
         return f"Error appending to {path}: {e}"
 
 
-def _fetch_url(url: str) -> str:
+def _fetch_url(url: str, known_targets: "set[str] | None" = None) -> str:
     import urllib.request, urllib.parse, ipaddress, socket, re as _re
     from core.llm_client import cfg as _cfg
     try:
@@ -1248,23 +1260,28 @@ def _fetch_url(url: str) -> str:
         return f"Invalid URL: {e}"
     # Block private / loopback / reserved addresses
     try:
-        for info in socket.getaddrinfo(hostname, None):
-            ip = ipaddress.ip_address(info[4][0])
+        resolved_ips = {info[4][0] for info in socket.getaddrinfo(hostname, None)}
+        for raw_ip in resolved_ips:
+            ip = ipaddress.ip_address(raw_ip)
             if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
                 return f"Blocked: {hostname} resolves to a private/internal address ({ip})."
     except socket.gaierror as e:
         return f"DNS resolution failed for {hostname}: {e}"
-    # Block configured target hosts
-    blocked = _cfg("blocked_hosts", "")
-    if blocked:
-        for pattern in (p.strip() for p in blocked.split(",") if p.strip()):
-            if hostname == pattern or hostname.endswith("." + pattern):
-                return f"Blocked: {hostname} matches blocked_hosts entry '{pattern}'."
+    # Block known op targets (from session beacons/activities) + configured list
+    blocked: set[str] = set(known_targets or [])
+    extra = _cfg("blocked_hosts", "")
+    if extra:
+        blocked.update(p.strip() for p in extra.split(",") if p.strip())
+    for pattern in blocked:
+        if hostname == pattern or hostname.endswith("." + pattern):
+            return f"Blocked: {hostname} matches a known target ('{pattern}')."
+    # Also block any resolved IP that appears in the known targets set
+    if resolved_ips & blocked:
+        return f"Blocked: {hostname} resolves to a known target IP."
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             raw = resp.read(65536).decode("utf-8", errors="replace")
-        # Strip tags and collapse whitespace for readable output
         text = _re.sub(r"<[^>]+>", " ", raw)
         text = _re.sub(r"\s+", " ", text).strip()
         if len(text) > 4000:
