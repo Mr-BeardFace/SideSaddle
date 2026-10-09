@@ -104,7 +104,12 @@ _EXPIRY_BUFFER  = 5 * 60  # refresh 5 min before expiry
 _SUB_TOKENS_DEFAULT = Path.home() / ".config" / "sidesaddle" / "anthropic_sub_tokens.json"
 
 
+_SUB_TOKENS_OVERRIDE: Path | None = None  # set by providers_local.py via api.set_tokens_path()
+
+
 def _tokens_path() -> Path:
+    if _SUB_TOKENS_OVERRIDE is not None:
+        return _SUB_TOKENS_OVERRIDE
     override = os.environ.get("SIDESADDLE_SUB_TOKENS")
     return Path(override) if override else _SUB_TOKENS_DEFAULT
 
@@ -422,12 +427,18 @@ def _external_api():
     import types
     ns = types.SimpleNamespace()
     ns.set_sub_client_id = _set_sub_client_id
+    ns.set_tokens_path   = _set_tokens_path
     return ns
 
 
 def _set_sub_client_id(client_id: str) -> None:
     global _SUB_CLIENT_ID
     _SUB_CLIENT_ID = client_id
+
+
+def _set_tokens_path(path) -> None:
+    global _SUB_TOKENS_OVERRIDE
+    _SUB_TOKENS_OVERRIDE = Path(path).expanduser()
 
 
 _load_external_providers()

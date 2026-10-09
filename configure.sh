@@ -84,10 +84,7 @@ ssop() {
 
 # Start script session — only if SS_OP is set and not already in a script session
 if [[ -z "\${SCRIPT_LOG_ACTIVE}" && -t 0 ]]; then
-    if [[ -z "\${SS_OP:-}" ]]; then
-        echo "[SideSaddle] SS_OP not set — logging disabled."
-        echo "             Run: ssop <op_name>  then open a new terminal."
-    else
+    if [[ -n "\${SS_OP:-}" ]]; then
         export SCRIPT_LOG_ACTIVE=1
         _ss_dir="\${_SS_ROOT}/\${SS_OP}"
         mkdir -p "\${_ss_dir}"
