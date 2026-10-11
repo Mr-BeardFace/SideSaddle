@@ -148,6 +148,55 @@ def _reconstruct_pty_echo(lines: list[str]) -> tuple[str, list[str]]:
     return "".join(cmd_parts), []
 
 
+# ── prompt identity + session-event helpers ──────────────────────────────────
+# Extracts (user, host, privs) from any remote prompt line.
+# Used once on bootstrap, then compared on every subsequent remote prompt.
+_PROMPT_ID = re.compile(r"([\w\-\.]+)@([\w\-\.]+).*?([$#])\s*$")
+
+def _prompt_identity(prompt: str) -> tuple[str, str, str] | None:
+    m = _PROMPT_ID.search(prompt)
+    return (m.group(1), m.group(2), m.group(3)) if m else None
+
+def _make_session_event(
+    old: tuple[str, str, str], new: tuple[str, str, str]
+) -> dict:
+    ou, oh, op = old
+    nu, nh, np = new
+    if oh != nh:
+        sig = f"lateral movement → {nh}"
+    elif op == "$" and np == "#":
+        sig = "privilege escalation → root"
+    elif ou != nu:
+        sig = f"user changed: {ou} → {nu}"
+    else:
+        sig = "prompt changed"
+    return {
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "command": f"(session event: {sig})",
+        "output": f"{ou}@{oh}{op} → {nu}@{nh}{np}",
+        "context": "session-event",
+    }
+
+
+def _is_assembled_echo(garbled: str, candidate: str) -> bool:
+    """
+    True if candidate is the real assembled command that garbled was corrupted from
+    (backspace typo artifacts left extra chars in the PTY concat).
+    Tests: first 3 chars match (command name is always typed correctly),
+    length is close (≥70%), and candidate's chars are a subsequence of garbled.
+    ponytail: subsequence + prefix + ratio — cheap and specific enough for this case
+    """
+    g = re.sub(r"\s+", "", garbled)
+    c = re.sub(r"\s+", "", candidate)
+    if not c or len(c) < 3 or len(c) < len(g) * 0.7:
+        return False
+    pfx = min(3, len(c), len(g))
+    if g[:pfx] != c[:pfx]:
+        return False
+    it = iter(g)
+    return all(ch in it for ch in c)
+
+
 # ── block ─────────────────────────────────────────────────────────────────────
 
 _NOISE_LINES = re.compile(r"^[=>%\s]*$")  # pure prompt-suffix noise
@@ -223,11 +272,17 @@ class _Block:
         # PTY char-echo: consecutive short lines = keystrokes, first long line = output
         cmd, output = _reconstruct_pty_echo(content)
         if cmd:
+            # If backspace corrupted the concat, the real assembled command may be
+            # the first output line — promote it and relabel as NC
+            if output and _is_assembled_echo(cmd, output[0]):
+                cmd, output, ctx = output[0], output[1:], "remote-nc"
+            else:
+                ctx = "remote-pty"
             return {
                 "timestamp": ts,
                 "command": cmd,
                 "output": "\n".join(output[:_MAX_OUTPUT_LINES]).strip(),
-                "context": "remote-pty",
+                "context": ctx,
             }
 
         # Give up: return as raw blob so analyst still sees it
@@ -256,6 +311,8 @@ def parse_chunks(raw: bytes) -> list[dict]:
 
     chunks: list[dict] = []
     current: _Block | None = None
+    learned_prompt: str | None = None          # exact string of first remote prompt
+    learned_id: tuple[str, str, str] | None = None  # (user, host, $/#)
 
     for line in lines:
         stripped = line.strip()
@@ -293,7 +350,25 @@ def parse_chunks(raw: bytes) -> list[dict]:
             continue
 
         # ── remote prompt ─────────────────────────────────────────────────────
-        if _REMOTE_PROMPT.match(stripped):
+        # Fast path: exact string match against learned prompt (O(1), no regex).
+        # Falls back to regex for bootstrap, CWD changes, or first occurrence.
+        is_remote = stripped == learned_prompt
+        if not is_remote and _REMOTE_PROMPT.match(stripped):
+            is_remote = True
+            new_id = _prompt_identity(stripped)
+            if learned_prompt is None:
+                learned_prompt, learned_id = stripped, new_id
+            elif new_id and learned_id and new_id != learned_id:
+                # Identity changed → emit session event, then start fresh block
+                if current is not None:
+                    chunk = current.finalize()
+                    if chunk:
+                        chunks.append(chunk)
+                    current = None
+                chunks.append(_make_session_event(learned_id, new_id))
+                learned_prompt, learned_id = stripped, new_id
+
+        if is_remote:
             if current is not None:
                 chunk = current.finalize()
                 if chunk:
@@ -329,6 +404,9 @@ def chunks_to_text(chunks: list[dict]) -> str:
     """Format parsed chunks into a clean, LLM-readable string."""
     parts = []
     for c in chunks:
+        if c.get("context") == "session-event":
+            parts.append(f"[{c['timestamp']}] *** {c['command']} ***\n{c.get('output', '')}")
+            continue
         ctx = f"[{c.get('context', '?')}] " if c.get("context") else ""
         block = f"[{c['timestamp']}] {ctx}$ {c['command']}"
         if c.get("output"):
