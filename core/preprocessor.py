@@ -142,20 +142,23 @@ def _reconstruct_from_echo(lines: list[str]) -> tuple[str, list[str]]:
 
 
 def _looks_like_full_command(line: str) -> bool:
-    """Heuristic: does this line look like a complete shell command (PTY mode)?"""
+    """True when line starts with a known command name.
+    Deliberately strict — no broad 'has space' fallback, which fires on
+    output lines (directory listings, ps rows, netstat warnings, etc.).
+    ponytail: extend the list when a new tool is seen in the wild
+    """
     s = line.strip()
-    if not s or len(s) < 2:
+    if not s:
         return False
-    # Starts with a common command name
     return bool(re.match(
         r"^(ls|cd|cat|grep|find|ps|id|whoami|netstat|ss|uname|python[23]?|"
         r"bash|sh|sudo|wget|curl|nc|ssh|export|echo|mkdir|chmod|chown|"
         r"rm|cp|mv|tar|unzip|which|file|strings|head|tail|less|more|"
-        r"script|env|set|printenv|history|ping|nmap|John|hydra|"
-        r"perl|ruby|php|java|./)\b",
+        r"script|env|set|printenv|history|ping|nmap|john|hydra|"
+        r"perl|ruby|php|java|\./)(\b|$|\s)",
         s,
         re.IGNORECASE,
-    )) or (" " in s and len(s) > 4)
+    ))
 
 
 # ── block ─────────────────────────────────────────────────────────────────────
