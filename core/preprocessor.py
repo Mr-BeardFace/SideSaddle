@@ -31,10 +31,20 @@ _LOCAL_PROMPT = re.compile(
     r"\[([^\]]+)\]:([^\$\n]*)\$"                           # [user@host]:path$
 )
 
-# Remote shell prompt: [user@host dir]$ or [user@host dir]#
-# May be prefixed with stripped OSC remnant like "0;hostname:~"
+# Remote shell prompt — matches common shell prompt endings.
+# Deliberately broad: ends with $, #, or > after typical prompt content.
+# Guarded by max-length (prompts are short) and a user@host or path shape.
+# ponytail: heuristic — extend the pattern when a new shell format is seen
 _REMOTE_PROMPT = re.compile(
-    r"^(?:[0-9];[^\[]*)?\[[\w\-\.]+@[\w\-\.]+ [^\]]+\][$#]\s*$"
+    r"^"
+    r"(?:[0-9];[^\[]*)?+"            # optional stripped OSC prefix (0;hostname:~)
+    r"(?:"
+    r"\[[\w\-\.]+@[\w\-\.][^\]]*\]"  # [user@host ...] style
+    r"|[\w\-\.]+@[\w\-\.]+[:/~]"     # user@host: or user@host/ style
+    r"|[\w\-\.]+:[/~]"               # host:/path style
+    r")"
+    r"[^\n]{0,60}"                   # path/suffix, capped at 60 chars
+    r"[$#>]\s*$"                     # ends with prompt char
 )
 
 # ── OSC title classification ──────────────────────────────────────────────────
@@ -274,7 +284,8 @@ def parse_chunks(raw: bytes) -> list[dict]:
             continue
 
         # ── skip other OSC remnants: "0;...", "1;...", "7;..." ───────────────
-        if _OSC_REMNANT.match(stripped) and "[$#]" not in stripped:
+        # "[$#]" would be a literal string check, not a char class — use re
+        if _OSC_REMNANT.match(stripped) and not re.search(r"[$#]", stripped):
             continue
 
         # ── local prompt ──────────────────────────────────────────────────────
