@@ -8,6 +8,7 @@ from typing import Callable
 
 from core import config, llm_client, preprocessor
 from core.engagement_state import EngagementState
+from core.store import EngagementStore
 
 _ANALYSIS_SYSTEM = """You are an expert red team analyst embedded in a live penetration test operation.
 You have access to terminal logs, C2 console output, and the current engagement state.
@@ -395,11 +396,13 @@ class Analyst:
         state: EngagementState,
         on_activity: Callable[[str], None],
         on_state_update: Callable[[EngagementState], None],
+        store: EngagementStore | None = None,
     ) -> None:
         self._state = state
         self._on_activity = on_activity
         self._on_state_update = on_state_update
-        self._pending: list[tuple[Path, bytes]] = []
+        self._store = store
+        self._pending: list[list[dict]] = []
         self._pending_lock = threading.Lock()
         self._last_new_content = 0.0
         self._running = False
@@ -416,8 +419,14 @@ class Analyst:
         self._running = False
 
     def queue_new_content(self, path: Path, data: bytes) -> None:
+        chunks = preprocessor.parse_chunks(data)
+        if self._store is not None and chunks:
+            try:
+                self._store.add_chunks(chunks)
+            except Exception as e:
+                self._on_activity(f"[bold red]DB write error:[/bold red] {e}")
         with self._pending_lock:
-            self._pending.append((path, data))
+            self._pending.append(chunks)
         self._last_new_content = time.time()
 
     def _run(self) -> None:
@@ -433,11 +442,9 @@ class Analyst:
                 self._pending.clear()
             self._analyze(batch)
 
-    def _analyze(self, batch: list[tuple[Path, bytes]]) -> None:
+    def _analyze(self, batch: list[list[dict]]) -> None:
         try:
-            all_chunks: list[dict] = []
-            for _, raw in batch:
-                all_chunks.extend(preprocessor.parse_chunks(raw))
+            all_chunks: list[dict] = [c for chunk_list in batch for c in chunk_list]
             if not all_chunks:
                 return
 
@@ -481,6 +488,9 @@ class Analyst:
                     self._save_state()
                     self._on_state_update(self._state)
 
+                    if self._store is not None:
+                        self._push_update_to_db(update)
+
                     advisory = update.get("advisory", "")
                     if advisory:
                         self._on_activity(f"[bold yellow]Analyst:[/bold yellow] {advisory}")
@@ -490,6 +500,102 @@ class Analyst:
 
         except Exception as e:
             self._on_activity(f"[bold red]Analyst error:[/bold red] {e}")
+
+    def _push_update_to_db(self, update: dict) -> None:
+        """Write one LLM update dict into every relevant DB table. Fire-and-forget."""
+        s = self._store
+        try:
+            for h in update.get("hosts", []):
+                s.upsert_host(
+                    ip=h["ip"],
+                    hostname=h.get("hostname", ""),
+                    os=h.get("os", ""),
+                    notes=h.get("notes", ""),
+                    open_ports=h.get("open_ports"),
+                )
+            for b in update.get("beacons", []):
+                s.upsert_beacon(
+                    beacon_id=b["id"],
+                    host=b.get("host", ""),
+                    ip=b.get("ip", ""),
+                    user=b.get("user", ""),
+                    arch=b.get("arch", ""),
+                    os=b.get("os", ""),
+                    notes=b.get("notes", ""),
+                )
+            for sv in update.get("surfaces", []):
+                s.add_surface(
+                    host=sv["host"],
+                    service=sv.get("service", ""),
+                    port=sv.get("port"),
+                    fingerprint=sv.get("fingerprint", ""),
+                    notes=sv.get("notes", ""),
+                )
+            for c in update.get("credentials", []):
+                if c.get("secret"):
+                    s.add_credential(
+                        username=c.get("username", ""),
+                        secret=c["secret"],
+                        cred_type=c.get("type", "password"),
+                        cred_format=c.get("format", ""),
+                        location=c.get("location", ""),
+                        service=c.get("service", ""),
+                        source_host=c.get("source_host", ""),
+                        added_by="analyst",
+                    )
+            for f in update.get("findings", []):
+                s.add_finding(
+                    severity=f.get("severity", "info"),
+                    title=f["title"],
+                    description=f.get("description", ""),
+                    target=f.get("target", ""),
+                    evidence=f.get("evidence", ""),
+                    technique=f.get("technique", ""),
+                )
+            for l in update.get("leads", []):
+                s.add_lead(
+                    description=l["description"],
+                    reach_level=l.get("reach_level", "vuln"),
+                    prior=float(l.get("prior", 0.5)),
+                    cost=l.get("cost", "medium"),
+                    target=l.get("target", ""),
+                    technique=l.get("technique", ""),
+                    created_by="analyst",
+                    notes=l.get("notes", ""),
+                )
+            for f in update.get("facts", []):
+                s.add_fact(
+                    statement=f["statement"],
+                    evidence=f.get("evidence", ""),
+                    scope=f.get("scope", ""),
+                )
+            for p in update.get("persistence", []):
+                s.add_persistence(
+                    kind=p.get("kind", "other"),
+                    host=p.get("host", ""),
+                    detail=p.get("detail", ""),
+                    cleanup=p.get("cleanup", ""),
+                )
+            for a in update.get("auth_attempts", []):
+                s.add_auth_attempt(
+                    service=a["service"],
+                    host=a["host"],
+                    result=a["result"],
+                    port=a.get("port"),
+                    username=a.get("username", ""),
+                    secret_masked=a.get("secret_masked", ""),
+                )
+            # Analyst cycle — one row per analysis run
+            s.add_analyst_cycle(
+                frontier_level=self._state.frontier,
+                summary=update.get("op_picture", ""),
+                hypothesis="",   # LLM doesn't emit hypothesis in this tool call
+                next_steps=[l["description"] for l in update.get("leads", [])[:5]],
+                op_picture=update.get("op_picture", ""),
+                advisory=update.get("advisory", ""),
+            )
+        except Exception as e:
+            self._on_activity(f"[bold red]DB push error:[/bold red] {e}")
 
     def _state_summary(self) -> str:
         s = self._state

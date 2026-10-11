@@ -1,0 +1,10 @@
+anthropic[bedrock]>=0.40.0
+cryptography>=42.0.0
+textual>=0.85.0
+pydantic>=2.0.0
+pyyaml>=6.0
+keyring>=25.0.0
+openpyxl>=3.1.0
+click>=8.1.0
+httpx>=0.27.0
+pyperclip>=1.8.0

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.env
+config.yaml
+*.log
+session_state.json
+ai_workspace/
+debug_*.json
+anthropic_sub_tokens.json

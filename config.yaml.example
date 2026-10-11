@@ -1,0 +1,29 @@
+active_provider: bedrock  # anthropic | bedrock | anthropic-sub
+
+op:
+  name: engagement_name
+  working_directory: ~/ops  # base dir; op subdir created automatically: ~/ops/<name>/
+
+analyst:
+  interval: 10    # seconds between log polls
+  debounce: 15    # seconds to wait after last new log content before firing
+
+bedrock:
+  region: us-east-1
+  model: us.anthropic.claude-opus-4-5-v1:0
+  profile: default  # AWS credential profile name
+
+anthropic:
+  model: claude-opus-4-5-20251101
+
+c2:
+  enabled: false
+  nighthawk:
+    url: https://teamserver:8443
+    # key stored via: python SideSaddle.py key set nighthawk
+
+scope:
+  targets: []       # optional: known target IPs/ranges (aids IOC tagging)
+  exclusions: []    # IPs/hosts that are never op-related
+
+debug: false
