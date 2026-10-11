@@ -125,40 +125,27 @@ def _reconstruct_from_echo(lines: list[str]) -> tuple[str, list[str]]:
 
         concat += s
 
-    # Concat-match failed (terminal artifacts in char echo).
-    # Fallback: scan from the BEGINNING for the first full-command-looking line
-    # — in no-PTY sessions the assembled command appears AFTER the single-char
-    # fragments but BEFORE the output; single chars (len≤2) are never commands.
-    # ponytail: O(n), fine for log chunks; heuristic ceiling documented below
-    for j, line in enumerate(lines):
-        s = line.strip()
-        # skip single/double char echo fragments
-        if not s or len(s) <= 2:
-            continue
-        if _looks_like_full_command(s):
-            return s, [l for l in lines[j + 1:] if l.strip()]
-
     return "", [l for l in lines if l.strip()]
 
 
-def _looks_like_full_command(line: str) -> bool:
-    """True when line starts with a known command name.
-    Deliberately strict — no broad 'has space' fallback, which fires on
-    output lines (directory listings, ps rows, netstat warnings, etc.).
-    ponytail: extend the list when a new tool is seen in the wild
-    """
-    s = line.strip()
-    if not s:
-        return False
-    return bool(re.match(
-        r"^(ls|cd|cat|grep|find|ps|id|whoami|netstat|ss|uname|python[23]?|"
-        r"bash|sh|sudo|wget|curl|nc|ssh|export|echo|mkdir|chmod|chown|"
-        r"rm|cp|mv|tar|unzip|which|file|strings|head|tail|less|more|"
-        r"script|env|set|printenv|history|ping|nmap|john|hydra|"
-        r"perl|ruby|php|java|\./)(\b|$|\s)",
-        s,
-        re.IGNORECASE,
-    ))
+# ── PTY char-echo reconstruction ─────────────────────────────────────────────
+# Human-visible pattern: keystrokes echo as 1-4 char lines; output lines are longer.
+# Collect short lines → concatenate → command. First long line = output starts.
+# ponytail: threshold=4 heuristic; raise to 5 if fragments like "ssh " are seen
+
+_PTY_ECHO_THRESHOLD = 4
+
+def _reconstruct_pty_echo(lines: list[str]) -> tuple[str, list[str]]:
+    cmd_parts: list[str] = []
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not s:
+            continue
+        if len(s) <= _PTY_ECHO_THRESHOLD:
+            cmd_parts.append(s)
+        else:
+            return "".join(cmd_parts), [l for l in lines[i:] if l.strip()]
+    return "".join(cmd_parts), []
 
 
 # ── block ─────────────────────────────────────────────────────────────────────
@@ -233,12 +220,13 @@ class _Block:
                 "context": "remote-nc",
             }
 
-        # PTY mode: check if first line looks like a full command
-        if _looks_like_full_command(content[0]):
+        # PTY char-echo: consecutive short lines = keystrokes, first long line = output
+        cmd, output = _reconstruct_pty_echo(content)
+        if cmd:
             return {
                 "timestamp": ts,
-                "command": content[0],
-                "output": "\n".join(content[1:_MAX_OUTPUT_LINES]).strip(),
+                "command": cmd,
+                "output": "\n".join(output[:_MAX_OUTPUT_LINES]).strip(),
                 "context": "remote-pty",
             }
 
