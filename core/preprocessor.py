@@ -204,13 +204,25 @@ _OSC_REMNANT = re.compile(r"^[0-9];")     # any stripped OSC remnant
 
 
 class _Block:
-    def __init__(self, timestamp: str | None, context: str):
+    def __init__(
+        self,
+        timestamp: str | None,
+        context: str,
+        identity: tuple[str, str, str] | None = None,
+    ):
         self.timestamp = timestamp        # from local prompt, or None
         self.context = context            # "local" | "remote"
+        self.identity = identity          # (user, host, $/#) for remote blocks
         self.command_title: str | None = None  # from OSC 2 title
         self.lines: list[str] = []        # raw content lines
         self.extra_output: list[str] = [] # output fragments found inline with title
         self._title_at: int = -1          # len(lines) when title was set
+
+    def _tag(self, chunk: dict) -> dict:
+        """Merge remote_user/host/privs into chunk when identity is known."""
+        if self.identity:
+            chunk["remote_user"], chunk["remote_host"], chunk["remote_privs"] = self.identity
+        return chunk
 
     def add(self, line: str) -> None:
         s = line.strip()
@@ -240,12 +252,12 @@ class _Block:
             else:
                 post = content
             output_lines = self.extra_output + post
-            return {
+            return self._tag({
                 "timestamp": ts,
                 "command": self.command_title,
                 "output": "\n".join(output_lines[:_MAX_OUTPUT_LINES]).strip(),
                 "context": self.context,
-            }
+            })
 
         if not content:
             return None
@@ -262,12 +274,12 @@ class _Block:
         # Remote — try assembled-command reconstruction first
         cmd, output = _reconstruct_from_echo(content)
         if cmd:
-            return {
+            return self._tag({
                 "timestamp": ts,
                 "command": cmd,
                 "output": "\n".join(output[:_MAX_OUTPUT_LINES]).strip(),
                 "context": "remote-nc",
-            }
+            })
 
         # PTY char-echo: consecutive short lines = keystrokes, first long line = output
         cmd, output = _reconstruct_pty_echo(content)
@@ -278,20 +290,20 @@ class _Block:
                 cmd, output, ctx = output[0], output[1:], "remote-nc"
             else:
                 ctx = "remote-pty"
-            return {
+            return self._tag({
                 "timestamp": ts,
                 "command": cmd,
                 "output": "\n".join(output[:_MAX_OUTPUT_LINES]).strip(),
                 "context": ctx,
-            }
+            })
 
         # Give up: return as raw blob so analyst still sees it
-        return {
+        return self._tag({
             "timestamp": ts,
             "command": "(remote session)",
             "output": "\n".join(content[:_MAX_OUTPUT_LINES]).strip(),
             "context": "remote-raw",
-        }
+        })
 
 
 # ── main entry points ─────────────────────────────────────────────────────────
@@ -373,7 +385,7 @@ def parse_chunks(raw: bytes) -> list[dict]:
                 chunk = current.finalize()
                 if chunk:
                     chunks.append(chunk)
-            current = _Block(timestamp=None, context="remote")
+            current = _Block(timestamp=None, context="remote", identity=learned_id)
             continue
 
         # ── content line ──────────────────────────────────────────────────────
