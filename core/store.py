@@ -659,6 +659,180 @@ class EngagementStore:
             "SELECT * FROM attack_paths ORDER BY ts"
         ).fetchall()]
 
+    # ── log cursors (for LogWatcher resume) ──────────────────────────────────
+
+    def save_cursors(self, cursors: dict) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('log_cursors', ?)",
+            (json.dumps({str(k): v for k, v in cursors.items()}),),
+        )
+        self._conn.commit()
+
+    def get_cursors(self) -> dict[str, int]:
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key = 'log_cursors'"
+        ).fetchone()
+        if not row:
+            return {}
+        try:
+            return json.loads(row[0])
+        except Exception:
+            return {}
+
+    # ── state hydration ───────────────────────────────────────────────────────
+
+    def load_state(self) -> "EngagementState":
+        """Rebuild an EngagementState from all DB tables."""
+        from core.engagement_state import (
+            EngagementState, Host, Beacon, Credential, Finding, Lead,
+            Surface, OperationalFact, AuthAttempt, PersistenceItem,
+        )
+
+        hosts = [
+            Host(
+                ip=h["ip"],
+                hostname=h.get("hostname") or "",
+                os=h.get("os") or "",
+                open_ports=json.loads(h["open_ports"]) if h.get("open_ports") else [],
+                notes=h.get("notes") or "",
+            )
+            for h in self.get_hosts()
+        ]
+
+        beacons = [
+            Beacon(
+                id=b["beacon_id"],
+                host=b.get("host") or "",
+                ip=b.get("ip") or "",
+                user=b.get("user") or "",
+                pid=b.get("pid") or "",
+                arch=b.get("arch") or "",
+                os=b.get("os") or "",
+                last_seen=b.get("last_seen") or None,
+                notes=b.get("notes") or "",
+            )
+            for b in self.get_beacons()
+        ]
+
+        credentials = [
+            Credential(
+                type=c.get("cred_type") or "password",
+                username=c.get("username") or "",
+                secret=c.get("secret") or "",
+                format=c.get("cred_format") or "",
+                location=c.get("location") or "",
+                service=c.get("service") or "",
+                source_host=c.get("source_host") or "",
+            )
+            for c in self.get_credentials(decrypt=True)
+        ]
+
+        findings = [
+            Finding(
+                severity=f["severity"],
+                title=f["title"],
+                description=f.get("description") or "",
+                target=f.get("target") or "",
+                evidence=f.get("evidence") or "",
+                technique=f.get("technique") or "",
+                verified=bool(f.get("verified")),
+            )
+            for f in self.get_findings()
+        ]
+
+        leads = [
+            Lead(
+                description=l["description"],
+                target=l.get("target") or "",
+                technique=l.get("technique") or "",
+                reach_level=l.get("reach_level") or "vuln",
+                prior=float(l.get("prior") or 0.5),
+                cost=l.get("cost") or "medium",
+                status=l.get("status") or "open",
+                notes=l.get("notes") or "",
+            )
+            for l in self.get_leads()
+        ]
+
+        surfaces = [
+            Surface(
+                host=sv["host"],
+                service=sv.get("service") or "",
+                port=sv.get("port"),
+                fingerprint=sv.get("fingerprint") or "",
+                status=sv.get("status") or "pending",
+                notes=sv.get("notes") or "",
+            )
+            for sv in self.get_surfaces()
+        ]
+
+        facts = [
+            OperationalFact(
+                statement=f["statement"],
+                evidence=f.get("evidence") or "",
+                scope=f.get("scope") or "",
+                status=f.get("status") or "confirmed",
+            )
+            for f in self.get_facts()
+        ]
+
+        auth_attempts = [
+            AuthAttempt(
+                service=a["service"],
+                host=a["host"],
+                port=a.get("port"),
+                username=a.get("username") or "",
+                secret_masked=a.get("secret_masked") or "",
+                result=a.get("result") or "unknown",
+            )
+            for a in self.get_auth_attempts()
+        ]
+
+        persistence = [
+            PersistenceItem(
+                kind=p["kind"],
+                host=p["host"],
+                detail=p["detail"],
+                cleanup=p.get("cleanup") or "",
+            )
+            for p in self.get_persistence()
+        ]
+
+        # Frontier, op_picture, last_analysis from most recent analyst cycle
+        frontier = "recon"
+        op_picture = ""
+        last_analysis = None
+        last_cycles = self.get_last_cycles(1)
+        if last_cycles:
+            c = last_cycles[0]
+            frontier = c.get("frontier_level") or "recon"
+            op_picture = c.get("op_picture") or ""
+            if c.get("ts"):
+                try:
+                    last_analysis = datetime.strptime(c["ts"], "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    pass
+
+        # Op name from directory name (DB lives at op_dir/engagement.db)
+        op_name = self._path.parent.name
+
+        return EngagementState(
+            op_name=op_name,
+            frontier=frontier,
+            op_picture=op_picture,
+            last_analysis=last_analysis,
+            hosts=hosts,
+            beacons=beacons,
+            credentials=credentials,
+            findings=findings,
+            leads=leads,
+            surfaces=surfaces,
+            facts=facts,
+            auth_attempts=auth_attempts,
+            persistence=persistence,
+            log_cursors=self.get_cursors(),
+        )
+
     # ── summary ───────────────────────────────────────────────────────────────
 
     def summary(self) -> dict:

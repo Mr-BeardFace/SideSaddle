@@ -41,11 +41,7 @@ def cli(ctx: click.Context, op: str | None, c2: bool, passphrase: bool) -> None:
 
     op_name = config.op_name()
 
-    # ── Load or create engagement state ──────────────────────────────────────
-    state_path = config.op_dir() / "session_state.json"
-    state = EngagementState.load(state_path) if state_path.exists() else EngagementState(op_name=op_name)
-
-    # ── Passphrase resolution ─────────────────────────────────────────────────
+    # ── Passphrase + DB open ──────────────────────────────────────────────────
     # Order: SIDESADDLE_PASSPHRASE env var → keyring cache (72h) → interactive prompt
     env_pw = os.environ.get("SIDESADDLE_PASSPHRASE", "").strip()
     store: EngagementStore | None = None
@@ -79,7 +75,7 @@ def cli(ctx: click.Context, op: str | None, c2: bool, passphrase: bool) -> None:
         summary = store.summary()
         if summary["chunks"] > 0:
             last = store.get_last_cycles(1)
-            last_ts = last[-1]["ts"] if last else "unknown"
+            last_ts = last[0]["ts"] if last else "unknown"
             click.echo(f"Resuming: {op_name}  ({summary['chunks']} chunks, {summary['leads']} leads, last active: {last_ts})")
         else:
             click.echo(f"New engagement: {op_name}")
@@ -91,6 +87,16 @@ def cli(ctx: click.Context, op: str | None, c2: bool, passphrase: bool) -> None:
                 click.echo(f"[!] {pw_warning}")
     else:
         click.echo("No passphrase — running without DB (use --passphrase to enable)")
+
+    # ── Load engagement state ─────────────────────────────────────────────────
+    # DB is authoritative when it has data; JSON is a legacy fallback.
+    state_path = config.op_dir() / "session_state.json"
+    if store is not None and store.summary()["hosts"] > 0:
+        state = store.load_state()
+    elif state_path.exists():
+        state = EngagementState.load(state_path)
+    else:
+        state = EngagementState(op_name=op_name)
 
     analyst = Analyst(
         state=state,

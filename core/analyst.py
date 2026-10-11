@@ -672,6 +672,9 @@ class Analyst:
         return ". ".join(parts)
 
     def _save_state(self) -> None:
+        if self._store is not None:
+            self._store.save_cursors(self._state.log_cursors)
+            return
         state_path = config.op_dir() / "session_state.json"
         self._state.save(state_path)
 
