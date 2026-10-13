@@ -9,7 +9,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-_PBKDF2_ITERS = 390_000
+_PBKDF2_ITERS = 600_000
 _VERIFY_PAYLOAD = b"sidesaddle-verify-1"
 
 # Parses "user@host$ → user@host#" from session-event output field
@@ -230,7 +230,9 @@ class EngagementStore:
                 reach_level TEXT    DEFAULT 'vuln',
                 prior       REAL    DEFAULT 0.5,
                 cost        TEXT    DEFAULT 'medium',
+                opsec       TEXT    DEFAULT 'medium',
                 status      TEXT    DEFAULT 'open',
+                command     TEXT,
                 origin_id   INTEGER,
                 created_by  TEXT    DEFAULT 'analyst',
                 notes       TEXT,
@@ -244,9 +246,47 @@ class EngagementStore:
                 evidence    TEXT,
                 ts          TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS token_totals (
+                id                INTEGER PRIMARY KEY CHECK (id = 1),
+                input_tokens      INTEGER DEFAULT 0,
+                output_tokens     INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0,
+                cost_usd          REAL    DEFAULT 0.0,
+                cost_is_estimate  INTEGER DEFAULT 0,
+                last_updated      TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS activities (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                activity_id         TEXT    NOT NULL,
+                beacon_id           TEXT    DEFAULT '',
+                timestamp           TEXT    NOT NULL,
+                ioc_type            TEXT    DEFAULT 'unknown',
+                execution_context   TEXT    DEFAULT '',
+                execution_host      TEXT    DEFAULT '',
+                user_context        TEXT    DEFAULT '',
+                command_action      TEXT    DEFAULT '',
+                result              TEXT    DEFAULT '',
+                observable_artifacts TEXT   DEFAULT '',
+                created_at          TEXT    DEFAULT (datetime('now')),
+                UNIQUE(activity_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_activities_ts ON activities(timestamp);
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts      TEXT    NOT NULL,
+                message TEXT    NOT NULL
+            );
         """)
         self._conn.commit()
         self._migrate_schema()
+
+    _MIGRATION_TABLES = frozenset({
+        "hosts", "credentials", "analyst_cycles", "leads",
+        "findings", "beacons", "surfaces", "activities",
+        "auth_attempts", "persistence", "facts",
+    })
 
     def _migrate_schema(self) -> None:
         """Add columns introduced after a DB was first created. Safe to re-run."""
@@ -260,8 +300,11 @@ class EngagementStore:
             ("analyst_cycles",  "advisory TEXT"),
             ("leads",           "target TEXT"),
             ("leads",           "technique TEXT"),
+            ("leads",           "command TEXT"),
+            ("leads",           "opsec TEXT"),
         ]
         for table, col_def in migrations:
+            assert table in self._MIGRATION_TABLES, f"Unexpected migration table: {table!r}"
             col_name = col_def.split()[0]
             try:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
@@ -562,6 +605,41 @@ class EngagementStore:
             "SELECT * FROM auth_attempts ORDER BY ts"
         ).fetchall()]
 
+    # ── activities ────────────────────────────────────────────────────────────
+
+    def add_activity(
+        self,
+        activity_id: str,
+        beacon_id: str = "",
+        timestamp: str = "",
+        ioc_type: str = "unknown",
+        execution_context: str = "",
+        execution_host: str = "",
+        user_context: str = "",
+        command_action: str = "",
+        result: str = "",
+        observable_artifacts: str = "",
+    ) -> int:
+        cur = self._conn.execute(
+            """INSERT OR IGNORE INTO activities
+               (activity_id, beacon_id, timestamp, ioc_type, execution_context,
+                execution_host, user_context, command_action, result, observable_artifacts)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (activity_id, beacon_id, timestamp, ioc_type, execution_context,
+             execution_host, user_context, command_action, result, observable_artifacts),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def get_activities(self, ioc_type: str | None = None) -> list[dict]:
+        q = "SELECT * FROM activities"
+        params: list = []
+        if ioc_type:
+            q += " WHERE ioc_type = ?"
+            params.append(ioc_type)
+        q += " ORDER BY timestamp, id"
+        return [dict(r) for r in self._conn.execute(q, params).fetchall()]
+
     # ── analyst cycles ────────────────────────────────────────────────────────
 
     def add_analyst_cycle(
@@ -597,6 +675,42 @@ class EngagementStore:
                     pass
         return list(reversed(rows))  # return in chronological order
 
+    # ── token totals ──────────────────────────────────────────────────────────
+
+    def update_token_totals(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int,
+        cost_delta: float,
+        cost_is_estimate: bool,
+    ) -> None:
+        """Add a usage delta to the single cumulative row. Creates it on first call."""
+        self._conn.execute(
+            """INSERT INTO token_totals (id, input_tokens, output_tokens, cache_read_tokens,
+               cost_usd, cost_is_estimate, last_updated)
+               VALUES (1, ?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(id) DO UPDATE SET
+                 input_tokens      = input_tokens      + excluded.input_tokens,
+                 output_tokens     = output_tokens     + excluded.output_tokens,
+                 cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+                 cost_usd          = cost_usd          + excluded.cost_usd,
+                 cost_is_estimate  = excluded.cost_is_estimate,
+                 last_updated      = excluded.last_updated""",
+            (input_tokens, output_tokens, cache_read_tokens,
+             cost_delta, 1 if cost_is_estimate else 0),
+        )
+        self._conn.commit()
+
+    def get_token_totals(self) -> dict:
+        row = self._conn.execute("SELECT * FROM token_totals WHERE id = 1").fetchone()
+        if row is None:
+            return {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+                    "cost_usd": 0.0, "cost_is_estimate": False}
+        d = dict(row)
+        d["cost_is_estimate"] = bool(d.get("cost_is_estimate", 0))
+        return d
+
     # ── leads ─────────────────────────────────────────────────────────────────
 
     def add_lead(
@@ -608,6 +722,8 @@ class EngagementStore:
         kind: str = "",
         target: str = "",
         technique: str = "",
+        command: str = "",
+        opsec: str = "medium",
         origin_id: int | None = None,
         created_by: str = "analyst",
         notes: str = "",
@@ -616,10 +732,10 @@ class EngagementStore:
         cur = self._conn.execute(
             """INSERT INTO leads
                (kind, description, target, technique, reach_level, prior, cost,
-                origin_id, created_by, notes, ts)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                opsec, command, origin_id, created_by, notes, ts)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (kind, description, target, technique, reach_level, prior, cost,
-             origin_id, created_by, notes,
+             opsec, command, origin_id, created_by, notes,
              ts or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
         )
         self._conn.commit()
@@ -679,13 +795,37 @@ class EngagementStore:
         except Exception:
             return {}
 
+    def add_activity_log(self, ts: str, message: str) -> None:
+        self._conn.execute(
+            "INSERT INTO activity_log (ts, message) VALUES (?, ?)", (ts, message)
+        )
+        self._conn.commit()
+
+    def get_activity_log(self) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT ts, message FROM activity_log ORDER BY id"
+        ).fetchall()]
+
+    def set_op_ended(self) -> None:
+        ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('op_ended_at', ?)", (ts,)
+        )
+        self._conn.commit()
+
+    def get_op_ended(self) -> str | None:
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key = 'op_ended_at'"
+        ).fetchone()
+        return row[0] if row else None
+
     # ── state hydration ───────────────────────────────────────────────────────
 
     def load_state(self) -> "EngagementState":
         """Rebuild an EngagementState from all DB tables."""
         from core.engagement_state import (
             EngagementState, Host, Beacon, Credential, Finding, Lead,
-            Surface, OperationalFact, AuthAttempt, PersistenceItem,
+            Surface, OperationalFact, AuthAttempt, PersistenceItem, Activity,
         )
 
         hosts = [
@@ -749,6 +889,8 @@ class EngagementStore:
                 prior=float(l.get("prior") or 0.5),
                 cost=l.get("cost") or "medium",
                 status=l.get("status") or "open",
+                command=l.get("command") or "",
+                opsec=l.get("opsec") or "medium",
                 notes=l.get("notes") or "",
             )
             for l in self.get_leads()
@@ -813,6 +955,22 @@ class EngagementStore:
                 except Exception:
                     pass
 
+        activities = [
+            Activity(
+                activity_id=a["activity_id"],
+                beacon_id=a.get("beacon_id") or "",
+                timestamp=a["timestamp"],
+                ioc_type=a.get("ioc_type") or "unknown",
+                execution_context=a.get("execution_context") or "",
+                execution_host=a.get("execution_host") or "",
+                user_context=a.get("user_context") or "",
+                command_action=a.get("command_action") or "",
+                result=a.get("result") or "",
+                observable_artifacts=a.get("observable_artifacts") or "",
+            )
+            for a in self.get_activities()
+        ]
+
         # Op name from directory name (DB lives at op_dir/engagement.db)
         op_name = self._path.parent.name
 
@@ -830,6 +988,7 @@ class EngagementStore:
             facts=facts,
             auth_attempts=auth_attempts,
             persistence=persistence,
+            activities=activities,
             log_cursors=self.get_cursors(),
         )
 

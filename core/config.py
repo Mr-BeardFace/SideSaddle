@@ -64,15 +64,24 @@ def get_api_key(provider: str) -> str | None:
         if val := os.environ.get(env_key):
             _KEY_CACHE[provider] = val
             return val
-    val = keyring.get_password("sidesaddle", provider) or keyring.get_password("pentest-ai", provider)
+    try:
+        val = keyring.get_password("sidesaddle", provider) or keyring.get_password("pentest-ai", provider)
+    except Exception:
+        val = None
     if val:
         _KEY_CACHE[provider] = val
     return val
 
 
-def set_api_key(provider: str, key: str) -> None:
-    keyring.set_password("sidesaddle", provider, key)
+def set_api_key(provider: str, key: str) -> bool:
+    """Returns True if key was persisted to keyring, False if session-only."""
+    persisted = True
+    try:
+        keyring.set_password("sidesaddle", provider, key)
+    except Exception:
+        persisted = False
     _KEY_CACHE[provider] = key
+    return persisted
 
 
 _SS_BASE = Path.home() / ".local" / "share" / "sidesaddle"
@@ -80,13 +89,7 @@ _ACTIVE_LOG_DIR_FILE = _SS_BASE / ".active_log_dir"
 
 
 def op_dir() -> Path:
-    working_dir = get("op.working_directory", "")
-    op = get("op.name", "default")
-    if working_dir:
-        # working_directory is the base; op name is appended so each op gets its own subdir
-        p = Path(working_dir).expanduser() / op
-    else:
-        p = _SS_BASE / op
+    p = _SS_BASE / get("op.name", "default")
     p.mkdir(parents=True, exist_ok=True)
     return p
 

@@ -216,12 +216,449 @@ def _load_external_providers() -> None:
 _load_external_providers()
 
 
+# ── Provider registry ────────────────────────────────────────────────────────
+# Adding a provider = one entry here. /provider set, /provider model list,
+# and the OAI-compat HTTP backend all derive from this table.
+
+from dataclasses import dataclass, field as _dc_field
+
+
+@dataclass(frozen=True)
+class ProviderSpec:
+    name:          str
+    label:         str
+    keyring_key:   str
+    env_var:       str
+    key_prefixes:  tuple[str, ...]
+    native:        bool = False        # True → Anthropic SDK; False → OpenAI-compat HTTP
+    chat_url:      str  = ""
+    models_url:    str  = ""
+    auth_style:    str  = "bearer"     # "bearer" | "x-api-key"
+    free_only:     bool = False        # /models list shows only free models
+    extra_headers: dict = _dc_field(default_factory=dict)
+    key_optional:  bool = False
+    base_url_config: str = ""          # config key for a runtime base URL (local provider)
+
+
+PROVIDERS: dict[str, ProviderSpec] = {
+    "anthropic": ProviderSpec(
+        name="anthropic", label="Anthropic",
+        keyring_key="anthropic_api_key", env_var="ANTHROPIC_API_KEY",
+        key_prefixes=("sk-ant-",), native=True,
+        models_url="https://api.anthropic.com/v1/models", auth_style="x-api-key",
+    ),
+    "openrouter": ProviderSpec(
+        name="openrouter", label="OpenRouter",
+        keyring_key="openrouter_api_key", env_var="OPENROUTER_API_KEY",
+        key_prefixes=("sk-or-",),
+        chat_url="https://openrouter.ai/api/v1/chat/completions",
+        models_url="https://openrouter.ai/api/v1/models", free_only=True,
+        extra_headers={"HTTP-Referer": "https://sidesaddle", "X-Title": "SideSaddle"},
+    ),
+    "nvidia": ProviderSpec(
+        name="nvidia", label="NVIDIA",
+        keyring_key="nvidia_api_key", env_var="NVIDIA_API_KEY",
+        key_prefixes=("nvapi-",),
+        chat_url="https://integrate.api.nvidia.com/v1/chat/completions",
+        models_url="https://integrate.api.nvidia.com/v1/models",
+    ),
+    "local": ProviderSpec(
+        name="local", label="Local (OpenAI-compatible)",
+        keyring_key="local_api_key", env_var="LOCAL_API_KEY",
+        key_prefixes=(), key_optional=True,
+        base_url_config="local_base_url",
+    ),
+}
+
+_NATIVE_PROVIDERS = {"anthropic", "bedrock", "anthropic-sub"}
+
+
+def get_provider(name: str | None) -> ProviderSpec | None:
+    return PROVIDERS.get((name or "").lower())
+
+
+def _base_url_for(spec: ProviderSpec) -> str:
+    if not spec.base_url_config:
+        return ""
+    return (config.get(spec.base_url_config, "") or "").rstrip("/")
+
+
+def _chat_url_for(spec: ProviderSpec) -> str:
+    base = _base_url_for(spec)
+    return f"{base}/chat/completions" if base else spec.chat_url
+
+
+def _models_url_for(spec: ProviderSpec) -> str:
+    base = _base_url_for(spec)
+    return f"{base}/models" if base else spec.models_url
+
+
+def resolve_provider_key(spec: ProviderSpec) -> str | None:
+    env = os.environ.get(spec.env_var)
+    if env:
+        return env
+    return config.get_api_key(spec.name)
+
+
+def _auth_headers(spec: ProviderSpec, key: str | None) -> dict:
+    if not key:
+        return {}
+    if spec.auth_style == "x-api-key":
+        return {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    return {"Authorization": f"Bearer {key}"}
+
+
+def _is_temperature_rejected(msg: str) -> bool:
+    low = msg.lower()
+    return "temperature" in low and any(
+        kw in low for kw in ("deprecat", "not support", "unsupported",
+                             "not allowed", "cannot", "invalid")
+    )
+
+
+# ── OpenAI-compat format converters ──────────────────────────────────────────
+
+def _block_as_dict(block) -> dict:
+    if isinstance(block, dict):
+        return block
+    return {
+        "type":  getattr(block, "type",  ""),
+        "text":  getattr(block, "text",  ""),
+        "id":    getattr(block, "id",    ""),
+        "name":  getattr(block, "name",  ""),
+        "input": getattr(block, "input", {}),
+    }
+
+
+def _to_openai_messages(messages: list[dict]) -> list[dict]:
+    result: list[dict] = []
+    for msg in messages:
+        role, content = msg["role"], msg["content"]
+        if isinstance(content, str):
+            result.append({"role": role, "content": content})
+            continue
+        if role == "assistant":
+            text_parts, tool_calls = [], []
+            for raw in content:
+                b = _block_as_dict(raw)
+                if b.get("type") == "text" and b.get("text"):
+                    text_parts.append(b["text"])
+                elif b.get("type") == "tool_use":
+                    tool_calls.append({
+                        "id": b["id"], "type": "function",
+                        "function": {"name": b["name"],
+                                     "arguments": json.dumps(b.get("input", {}))},
+                    })
+            out: dict = {"role": "assistant", "content": " ".join(text_parts) or None}
+            if tool_calls:
+                out["tool_calls"] = tool_calls
+            result.append(out)
+        elif role == "user":
+            text_parts = []
+            for raw in content:
+                b = _block_as_dict(raw)
+                btype = b.get("type", "")
+                if btype == "tool_result":
+                    body = b.get("content", "")
+                    if isinstance(body, list):
+                        body = " ".join(_block_as_dict(x).get("text", "") for x in body)
+                    result.append({"role": "tool", "tool_call_id": b.get("tool_use_id", ""),
+                                   "content": str(body)})
+                elif btype == "text" and b.get("text"):
+                    text_parts.append(b["text"])
+            if text_parts:
+                result.append({"role": "user", "content": "\n\n".join(text_parts)})
+    return result
+
+
+def _to_openai_tools(tools: list[dict]) -> list[dict]:
+    result = []
+    for tool in tools:
+        params = dict(tool.get("input_schema", {}))
+        params.pop("cache_control", None)
+        result.append({"type": "function", "function": {
+            "name": tool["name"],
+            "description": tool.get("description", ""),
+            "parameters": params,
+        }})
+    return result
+
+
+from dataclasses import dataclass as _dc, field as _dcf
+
+
+@_dc
+class _TextBlock:
+    type: str = "text"
+    text: str = ""
+
+
+@_dc
+class _ToolUseBlock:
+    type:  str  = "tool_use"
+    id:    str  = ""
+    name:  str  = ""
+    input: dict = _dcf(default_factory=dict)
+
+
+@_dc
+class _Usage:
+    input_tokens:  int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens:     int = 0
+    cache_creation_input_tokens: int = 0
+
+
+@_dc
+class _OAIMessage:
+    stop_reason: str   = "end_turn"
+    content:     list  = _dcf(default_factory=list)
+    usage:       _Usage = _dcf(default_factory=_Usage)
+
+
+def _openai_response_to_anthropic(data: dict) -> "_OAIMessage":
+    choice   = data.get("choices", [{}])[0]
+    finish   = choice.get("finish_reason", "stop")
+    message  = choice.get("message", {})
+    stop     = {"tool_calls": "tool_use", "length": "max_tokens"}.get(finish, "end_turn")
+    content: list = []
+    text = message.get("content")
+    if text:
+        content.append(_TextBlock(type="text", text=text))
+    for tc in message.get("tool_calls") or []:
+        fn = tc.get("function", {})
+        try:
+            inputs = json.loads(fn.get("arguments", "{}"))
+        except Exception:
+            inputs = {}
+        content.append(_ToolUseBlock(type="tool_use", id=tc.get("id", ""),
+                                     name=fn.get("name", ""), input=inputs))
+    ud = data.get("usage", {})
+    usage = _Usage(input_tokens=ud.get("prompt_tokens", 0),
+                   output_tokens=ud.get("completion_tokens", 0))
+    return _OAIMessage(stop_reason=stop, content=content, usage=usage)
+
+
+# ── OAI-compat HTTP call (OpenRouter / NVIDIA / local) ───────────────────────
+
+# Per-session set of model IDs that rejected `temperature` (populated once, avoids repeated 400s)
+_no_temperature: set[str] = set()
+
+
+def _call_openai_compat(spec: ProviderSpec, model: str, system: str,
+                        messages: list[dict], tools: list[dict] | None,
+                        max_tokens: int) -> "_OAIMessage":
+    import httpx
+
+    key = resolve_provider_key(spec)
+    if not key and not spec.key_optional:
+        raise RuntimeError(f"{spec.label}: no API key — run /key set {spec.name} <key>")
+    if spec.base_url_config and not _base_url_for(spec):
+        raise RuntimeError(f"{spec.label}: no base URL — run /provider set local <url>")
+
+    oai_messages = [{"role": "system", "content": system}] + _to_openai_messages(messages)
+    payload: dict[str, Any] = {"model": model, "messages": oai_messages, "max_tokens": max_tokens}
+    temp = config.get("temp")
+    if temp is not None and model not in _no_temperature:
+        payload["temperature"] = temp
+    if tools:
+        payload["tools"] = _to_openai_tools(tools)
+        payload["tool_choice"] = "auto"
+
+    headers = {"Content-Type": "application/json",
+               **_auth_headers(spec, key), **spec.extra_headers}
+
+    delay = 4.0
+    for attempt in range(_MAX_RETRIES + 2):
+        try:
+            resp = httpx.post(_chat_url_for(spec), headers=headers, json=payload, timeout=120)
+            if resp.status_code == 200:
+                return _openai_response_to_anthropic(resp.json())
+            try:
+                err = resp.json().get("error", {}).get("message", resp.text)
+            except Exception:
+                err = resp.text
+            err = str(err)[:200]
+            if resp.status_code == 401:
+                raise anthropic.AuthenticationError(
+                    message=f"{spec.label} key rejected", response=None, body=None)
+            if resp.status_code in (429, 402) or "quota" in err.lower():
+                if attempt < _MAX_RETRIES:
+                    time.sleep(delay); delay = min(delay * 2, 60); continue
+                raise anthropic.RateLimitError(message=err, response=None, body=None)
+            if resp.status_code in (500, 502, 503):
+                if attempt < _MAX_RETRIES:
+                    time.sleep(delay); delay = min(delay * 2, 60); continue
+                raise anthropic.InternalServerError(message=err, response=None, body=None)
+            if resp.status_code == 400 and "temperature" in payload and _is_temperature_rejected(err):
+                _no_temperature.add(model)
+                payload.pop("temperature", None)
+                continue
+            raise RuntimeError(f"{spec.label} error {resp.status_code}: {err}")
+        except (anthropic.AuthenticationError, anthropic.RateLimitError,
+                anthropic.InternalServerError, RuntimeError):
+            raise
+        except Exception as e:
+            if attempt < _MAX_RETRIES:
+                time.sleep(delay); delay = min(delay * 2, 60); continue
+            raise RuntimeError(f"{spec.label} connection failed: {e}") from e
+    raise RuntimeError("OAI-compat retry loop exhausted")
+
+
+# ── Custom exceptions ─────────────────────────────────────────────────────────
+
+class APIAuthError(Exception):
+    """API key rejected or access denied — not retryable."""
+
+class APIAccountLimitError(Exception):
+    """Account credit / quota exhausted — not retryable."""
+
+class APIConnectionError(Exception):
+    """Network failure after all retries — resumable once connectivity returns."""
+
+class ModelRefusalError(Exception):
+    """Model refused the request content — looping won't help, switch models."""
+
+
+_QUOTA_KEYWORDS = ("quota", "credit", "billing", "balance", "insufficient",
+                   "exceeded your", "monthly", "daily limit", "account limit",
+                   "out of tokens")
+
+
+def _is_quota_exhaustion(msg: str) -> bool:
+    lower = msg.lower()
+    return any(kw in lower for kw in _QUOTA_KEYWORDS)
+
+
+# ── LLMClient class ───────────────────────────────────────────────────────────
+
+class LLMClient:
+    """Session-scoped LLM client.
+
+    Tracks per-session state (which models have rejected `temperature`) and adds
+    conversation prompt caching on the Anthropic native path. Re-reads the active
+    provider from config on each run() call so mid-session `/provider set` takes
+    effect immediately.
+    """
+    def __init__(self, on_retry: "Callable[[int, float, str], None] | None" = None):
+        self.on_retry = on_retry
+        self._no_temperature_models: set[str] = set()
+
+    def run(
+        self,
+        model: str,
+        system: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int = 8192,
+    ) -> Any:
+        provider = config.get("active_provider", "anthropic")
+        if provider == "bedrock":
+            return _call_bedrock(system, messages, tools, max_tokens)
+        if provider == "anthropic-sub":
+            return _call_sub(system, messages, tools, max_tokens)
+        spec = get_provider(provider)
+        if spec and not spec.native:
+            try:
+                return _call_openai_compat(spec, model, system, messages, tools, max_tokens)
+            except Exception as e:
+                if model not in self._no_temperature_models and _is_temperature_rejected(str(e)):
+                    self._no_temperature_models.add(model)
+                    return _call_openai_compat(spec, model, system, messages, tools, max_tokens)
+                raise
+        return self._run_anthropic(model, system, messages, tools, max_tokens)
+
+    @staticmethod
+    def _with_conversation_cache(messages: list[dict]) -> list[dict]:
+        """Mark the last user message block with cache_control so the growing
+        conversation prefix is cached and re-read cheaply on subsequent turns."""
+        if not messages or messages[-1].get("role") != "user":
+            return messages
+        last = messages[-1]
+        content = last.get("content")
+        if isinstance(content, str):
+            new_content = [{"type": "text", "text": content,
+                            "cache_control": {"type": "ephemeral"}}]
+        elif isinstance(content, list) and content and isinstance(content[-1], dict):
+            new_content = list(content)
+            blk = dict(new_content[-1])
+            blk["cache_control"] = {"type": "ephemeral"}
+            new_content[-1] = blk
+        else:
+            return messages
+        return messages[:-1] + [{**last, "content": new_content}]
+
+    def _run_anthropic(self, model: str, system: str, messages: list[dict],
+                       tools: list[dict] | None, max_tokens: int) -> Any:
+        key = config.get_api_key("anthropic")
+        client = anthropic.Anthropic(api_key=key)
+
+        system_blocks = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+        cached_tools = None
+        if tools:
+            cached_tools = list(tools)
+            last = dict(cached_tools[-1])
+            last["cache_control"] = {"type": "ephemeral"}
+            cached_tools[-1] = last
+
+        kwargs: dict[str, Any] = {
+            "model": model, "max_tokens": max_tokens,
+            "system": system_blocks,
+            "messages": self._with_conversation_cache(messages),
+        }
+        temp = config.get("temp")
+        if temp is not None and model not in self._no_temperature_models:
+            kwargs["temperature"] = temp
+        if cached_tools:
+            kwargs["tools"] = cached_tools
+
+        wait = 4.0
+        for attempt in range(_MAX_RETRIES + 2):
+            try:
+                return client.messages.create(**kwargs)
+            except anthropic.RateLimitError as e:
+                if _is_quota_exhaustion(str(e)):
+                    raise APIAccountLimitError("Request quota exhausted") from e
+                if attempt >= _MAX_RETRIES:
+                    raise APIAccountLimitError("Rate limit persists — quota may be exhausted") from e
+                if self.on_retry:
+                    self.on_retry(attempt + 1, wait, "Rate limited")
+                time.sleep(wait); wait = min(wait * 2, 60)
+            except anthropic.InternalServerError:
+                if attempt >= _MAX_RETRIES:
+                    raise
+                if self.on_retry:
+                    self.on_retry(attempt + 1, wait, "Server error")
+                time.sleep(wait); wait = min(wait * 2, 60)
+            except anthropic.APIConnectionError as e:
+                if attempt >= _MAX_RETRIES:
+                    raise APIConnectionError("Connection to Anthropic failed after retries") from e
+                if self.on_retry:
+                    self.on_retry(attempt + 1, wait, "Connection error")
+                time.sleep(wait); wait = min(wait * 2, 60)
+            except anthropic.AuthenticationError as e:
+                raise APIAuthError("API key rejected — run /key set anthropic <key>") from e
+            except anthropic.BadRequestError as e:
+                if "temperature" in kwargs and _is_temperature_rejected(str(e)):
+                    self._no_temperature_models.add(model)
+                    kwargs.pop("temperature", None)
+                    continue
+                raise
+        raise RuntimeError("LLMClient retry loop exhausted")
+
+
 # ── Main call interface ───────────────────────────────────────────────────────
 
 def _model() -> str:
     provider = config.get("active_provider", "anthropic")
     if provider == "bedrock":
         return config.get("bedrock.model", "us.anthropic.claude-opus-4-5-v1:0")
+    if provider == "openrouter":
+        return config.get("openrouter.model", "anthropic/claude-sonnet-4-5")
+    if provider == "nvidia":
+        return config.get("nvidia.model", "meta/llama-3.1-405b-instruct")
+    if provider == "local":
+        return config.get("local.model", "")
     return config.get("anthropic.model", "claude-opus-4-5-20251101")
 
 
@@ -231,13 +668,17 @@ def call(
     tools: list[dict] | None = None,
     max_tokens: int = 4096,
     extra_kwargs: dict[str, Any] | None = None,
-) -> anthropic.types.Message:
+) -> Any:
     provider = config.get("active_provider", "anthropic")
 
     if provider == "bedrock":
         return _call_bedrock(system, messages, tools, max_tokens)
     if provider == "anthropic-sub":
         return _call_sub(system, messages, tools, max_tokens)
+    # OpenAI-compat providers
+    spec = get_provider(provider)
+    if spec and not spec.native:
+        return _call_openai_compat(spec, _model(), system, messages, tools, max_tokens)
     return _call_api(system, messages, tools, max_tokens)
 
 

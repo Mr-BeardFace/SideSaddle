@@ -38,7 +38,7 @@ SETTINGS: tuple[Setting, ...] = (
         key="active_provider", label="Provider",
         desc="LLM provider to use",
         default="anthropic", type="str", group="Provider",
-        choices=("anthropic", "bedrock", "anthropic-sub"),
+        choices=("anthropic", "bedrock", "anthropic-sub", "openrouter", "nvidia", "local"),
         info_static=True,
     ),
     Setting(
@@ -61,6 +61,31 @@ SETTINGS: tuple[Setting, ...] = (
         key="bedrock.profile", label="Bedrock AWS profile",
         desc="AWS credential profile name (~/.aws/credentials)",
         default="default", type="str", group="Provider",
+    ),
+    Setting(
+        key="openrouter.model", label="OpenRouter model",
+        desc="Model slug for OpenRouter (e.g. anthropic/claude-sonnet-4-5)",
+        default="anthropic/claude-sonnet-4-5", type="str", group="Provider",
+    ),
+    Setting(
+        key="nvidia.model", label="NVIDIA model",
+        desc="Model ID for NVIDIA NIM (e.g. meta/llama-3.1-405b-instruct)",
+        default="meta/llama-3.1-405b-instruct", type="str", group="Provider",
+    ),
+    Setting(
+        key="local.model", label="Local model",
+        desc="Model name for the local OpenAI-compatible server",
+        default="", type="str", group="Provider", allow_null=True,
+    ),
+    Setting(
+        key="local_base_url", label="Local base URL",
+        desc="Base URL of local OpenAI-compatible server (e.g. http://localhost:11434/v1)",
+        default="", type="str", group="Provider", allow_null=True,
+    ),
+    Setting(
+        key="temp", label="Temperature",
+        desc="Sampling temperature (null = provider default; dropped if model rejects it)",
+        default=None, type="float", group="Provider", allow_null=True,
     ),
 
     # ── Analyst ─────────────────────────────────────────────────────────────────
@@ -120,6 +145,13 @@ SETTINGS: tuple[Setting, ...] = (
         key="debug", label="Debug",
         desc="Write raw LLM request/response JSON to debug_*.json",
         default=False, type="bool", group="Analyst",
+    ),
+    Setting(
+        key="persona", label="Analyst persona",
+        desc="Active analyst persona (agents/<persona>/persona.md)",
+        default="redteam", type="str", group="Analyst",
+        choices=("redteam", "pentest", "ctf"),
+        info_static=True,
     ),
 )
 

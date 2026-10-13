@@ -131,9 +131,10 @@ def _reconstruct_from_echo(lines: list[str]) -> tuple[str, list[str]]:
 # ── PTY char-echo reconstruction ─────────────────────────────────────────────
 # Human-visible pattern: keystrokes echo as 1-4 char lines; output lines are longer.
 # Collect short lines → concatenate → command. First long line = output starts.
-# ponytail: threshold=4 heuristic; raise to 5 if fragments like "ssh " are seen
+# ponytail: threshold=5; was 4 but 4-char PHP/output lines (e.g. "$amp") were being
+# swallowed as keystroke echo, sending file content into remote-raw blobs
 
-_PTY_ECHO_THRESHOLD = 4
+_PTY_ECHO_THRESHOLD = 5
 
 def _reconstruct_pty_echo(lines: list[str]) -> tuple[str, list[str]]:
     cmd_parts: list[str] = []
@@ -413,14 +414,21 @@ def parse_chunks(raw: bytes) -> list[dict]:
 
 
 def chunks_to_text(chunks: list[dict]) -> str:
-    """Format parsed chunks into a clean, LLM-readable string."""
+    """Format parsed chunks into a clean, LLM-readable string.
+
+    All target-sourced content is wrapped in <TARGET_OUTPUT> so the analyst
+    system prompt can treat it as untrusted data, not instructions.
+    """
     parts = []
     for c in chunks:
         if c.get("context") == "session-event":
             parts.append(f"[{c['timestamp']}] *** {c['command']} ***\n{c.get('output', '')}")
             continue
         ctx = f"[{c.get('context', '?')}] " if c.get("context") else ""
+        incomplete = c.get("context") == "remote-raw"
         block = f"[{c['timestamp']}] {ctx}$ {c['command']}"
+        if incomplete:
+            block += "  [NOTE: output structure unrecognised — content may be partial or misaligned]"
         if c.get("output"):
             out_lines = c["output"].splitlines()
             if len(out_lines) > 100:
@@ -429,7 +437,7 @@ def chunks_to_text(chunks: list[dict]) -> str:
             else:
                 block += "\n" + c["output"]
         parts.append(block)
-    return "\n\n".join(parts)
+    return "<TARGET_OUTPUT>\n" + "\n\n".join(parts) + "\n</TARGET_OUTPUT>"
 
 
 def read_all_logs(op_dir: Path) -> str:

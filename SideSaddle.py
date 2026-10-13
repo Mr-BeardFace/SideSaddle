@@ -23,8 +23,12 @@ from core.store import EngagementStore, BadPassphrase
 @click.option("--c2", is_flag=True, default=False, help="Enable C2 polling on start")
 @click.option("--passphrase", is_flag=True, default=False,
               help="Prompt for passphrase (forces re-entry and renews 72h cache)")
+@click.option("--debug", is_flag=True, default=False, help="Enable debug trace log")
+@click.option("--verbose", is_flag=True, default=False,
+              help="Enable verbose log (LLM calls, DB writes, all actions)")
 @click.pass_context
-def cli(ctx: click.Context, op: str | None, c2: bool, passphrase: bool) -> None:
+def cli(ctx: click.Context, op: str | None, c2: bool, passphrase: bool,
+        debug: bool, verbose: bool) -> None:
     """SideSaddle — Red Team Operator Companion
 
     Run without a subcommand to start a live operation.
@@ -33,17 +37,17 @@ def cli(ctx: click.Context, op: str | None, c2: bool, passphrase: bool) -> None:
         return  # subcommand handles everything
 
     # ── Op name ───────────────────────────────────────────────────────────────
-    if op:
-        config.set_value("op.name", op)
-    else:
-        name = click.prompt("Op name", default=config.op_name())
-        config.set_value("op.name", name)
+    if not op:
+        click.echo("Error: please provide an op name with --op <name>", err=True)
+        sys.exit(1)
+    config.set_value("op.name", op)
 
     op_name = config.op_name()
 
     # ── Passphrase + DB open ──────────────────────────────────────────────────
     # Order: SIDESADDLE_PASSPHRASE env var → keyring cache (72h) → interactive prompt
     env_pw = os.environ.get("SIDESADDLE_PASSPHRASE", "").strip()
+    os.environ.pop("SIDESADDLE_PASSPHRASE", None)
     store: EngagementStore | None = None
     pw_warning: str | None = None
 
@@ -52,35 +56,45 @@ def cli(ctx: click.Context, op: str | None, c2: bool, passphrase: bool) -> None:
     else:
         pw, was_prompted = resolve_passphrase(op_name, force_prompt=passphrase)
 
+    read_only = False
+
     if pw:
         db_path = config.op_dir() / "engagement.db"
 
-        # New engagement: confirm to avoid typo footgun
-        if not db_path.exists():
-            if not click.confirm(f"Create new engagement '{op_name}'?", default=True):
-                click.echo("Aborted.")
+        if db_path.exists():
+            # Existing op — ask continue or review
+            try:
+                store = EngagementStore(db_path, pw)
+            except BadPassphrase:
+                click.echo("Error: incorrect passphrase.", err=True)
+                sys.exit(1)
+            summary = store.summary()
+            last = store.get_last_cycles(1)
+            last_ts = last[0]["ts"] if last else "unknown"
+            click.echo(f"Op '{op_name}': {summary['chunks']} chunks, {summary['leads']} leads, last active: {last_ts}")
+            ans = input("  [C]ontinue live  [R]eview read-only  [A]bort  [C]: ").strip().lower()
+            if ans == "a":
+                print("Aborted.")
                 sys.exit(0)
-
-        try:
-            store = EngagementStore(db_path, pw)
-        except BadPassphrase:
-            click.echo("Error: incorrect passphrase.", err=True)
-            sys.exit(1)
+            if ans == "r":
+                read_only = True
+        else:
+            ans = input(f"Create new engagement '{op_name}'? [Y/n]: ").strip().lower()
+            if ans == "n":
+                print("Aborted.")
+                sys.exit(0)
+            try:
+                store = EngagementStore(db_path, pw)
+            except BadPassphrase:
+                click.echo("Error: incorrect passphrase.", err=True)
+                sys.exit(1)
+            click.echo(f"New engagement: {op_name}")
 
         # Cache only after successful open — wrong passphrase is never stored
         if was_prompted and not env_pw:
             cache_passphrase(op_name, pw)
 
-        # Startup status
-        summary = store.summary()
-        if summary["chunks"] > 0:
-            last = store.get_last_cycles(1)
-            last_ts = last[0]["ts"] if last else "unknown"
-            click.echo(f"Resuming: {op_name}  ({summary['chunks']} chunks, {summary['leads']} leads, last active: {last_ts})")
-        else:
-            click.echo(f"New engagement: {op_name}")
-
-        # Expiry warning (CLI) — only relevant when using cached passphrase
+        # Expiry warning — only relevant when using cached passphrase
         if not was_prompted and not env_pw:
             pw_warning = expiry_warning(op_name)
             if pw_warning:
@@ -89,9 +103,8 @@ def cli(ctx: click.Context, op: str | None, c2: bool, passphrase: bool) -> None:
         click.echo("No passphrase — running without DB (use --passphrase to enable)")
 
     # ── Load engagement state ─────────────────────────────────────────────────
-    # DB is authoritative when it has data; JSON is a legacy fallback.
     state_path = config.op_dir() / "session_state.json"
-    if store is not None and store.summary()["hosts"] > 0:
+    if store is not None:
         state = store.load_state()
     elif state_path.exists():
         state = EngagementState.load(state_path)
@@ -108,9 +121,10 @@ def cli(ctx: click.Context, op: str | None, c2: bool, passphrase: bool) -> None:
 
     from ui.app import SideSaddleApp
     app = SideSaddleApp(state=state, analyst=analyst, log_watcher=log_watcher,
-                        passphrase_warning=pw_warning)
+                        passphrase_warning=pw_warning, read_only=read_only,
+                        debug=debug, verbose=verbose)
 
-    if c2:
+    if c2 and not read_only:
         from core.c2.nighthawk import NighthawkC2
         NighthawkC2(config.op_dir(), on_activity=lambda m: None)
 
@@ -123,12 +137,9 @@ def cli(ctx: click.Context, op: str | None, c2: bool, passphrase: bool) -> None:
               help="Prompt for passphrase (forces re-entry)")
 def review(op_name: str, passphrase: bool) -> None:
     """Load a previous op in read-only mode (browse state + export IOC)."""
-    bases = [Path.home() / ".local" / "share" / "sidesaddle"]
-    wd = config.get("op.working_directory", "")
-    if wd:
-        bases.append(Path(wd).expanduser())
-
-    op_dir_path = next((b / op_name for b in bases if (b / op_name).exists()), None)
+    op_dir_path = config._SS_BASE / op_name
+    if not op_dir_path.exists():
+        op_dir_path = None
     if not op_dir_path:
         click.echo(f"No saved state found for op '{op_name}'. Use `list` to see available ops.")
         sys.exit(1)
@@ -139,6 +150,7 @@ def review(op_name: str, passphrase: bool) -> None:
     store: EngagementStore | None = None
     if db_path.exists():
         env_pw = os.environ.get("SIDESADDLE_PASSPHRASE", "").strip()
+        os.environ.pop("SIDESADDLE_PASSPHRASE", None)
         pw = env_pw if env_pw else resolve_passphrase(op_name, force_prompt=passphrase)[0]
         try:
             store = EngagementStore(db_path, pw)
@@ -146,7 +158,12 @@ def review(op_name: str, passphrase: bool) -> None:
             click.echo("Error: incorrect passphrase.", err=True)
             sys.exit(1)
 
-    state = EngagementState.load(state_path) if state_path.exists() else EngagementState(op_name=op_name)
+    if store is not None:
+        state = store.load_state()
+    elif state_path.exists():
+        state = EngagementState.load(state_path)
+    else:
+        state = EngagementState(op_name=op_name)
     click.echo(f"Loading op '{op_name}' in read-only mode")
 
     analyst = Analyst(state=state, on_activity=lambda m: None, on_state_update=lambda s: None, store=store)
@@ -161,19 +178,12 @@ def review(op_name: str, passphrase: bool) -> None:
 def list_ops() -> None:
     """List all saved operations."""
     import datetime
-    bases = [Path.home() / ".local" / "share" / "sidesaddle"]
-    wd = config.get("op.working_directory", "")
-    if wd:
-        bases.append(Path(wd).expanduser())
+    base = config._SS_BASE
     found = False
-    seen: set[str] = set()
-    for base in bases:
-        if not base.exists():
-            continue
+    if base.exists():
         for d in sorted(base.iterdir()):
-            if not d.is_dir() or d.name in seen:
+            if not d.is_dir():
                 continue
-            seen.add(d.name)
             db = d / "engagement.db"
             json_state = d / "session_state.json"
             if db.exists():

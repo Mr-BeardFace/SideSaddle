@@ -6,8 +6,8 @@ and per-command detail all derive from it. Adding a command means one entry here
 from __future__ import annotations
 from dataclasses import dataclass
 
-_PROVIDERS     = ("anthropic", "bedrock", "anthropic-sub")
-_KEY_PROVIDERS = ("anthropic", "bedrock", "nighthawk", "brave")
+_PROVIDERS     = ("anthropic", "bedrock", "anthropic-sub", "openrouter", "nvidia", "local")
+_KEY_PROVIDERS = ("anthropic", "bedrock", "openrouter", "nvidia", "local", "nighthawk", "brave")
 _ON_OFF        = ("on", "off")
 _FRONTIER_LEVELS = ("recon", "service", "vuln", "exploited", "foothold", "user", "privesc", "root")
 
@@ -90,8 +90,23 @@ COMMANDS: list[Command] = [
         Sub("set", "Set frontier level (overrides analyst)", f"<{'|'.join(_FRONTIER_LEVELS)}>", _FRONTIER_LEVELS),
     )),
 
-    Command("/export", "Export IOC CSVs + Excel from current op state",
-            (Sub("", "Generates activities.csv, beacons.csv, ioc.xlsx in the op directory"),)),
+    Command("/config", "View or change a setting", (
+        Sub("list",  "List all settings with current values",   "[group]"),
+        Sub("get",   "Show one setting's value",                "<key>"),
+        Sub("set",   "Change a setting",                        "<key> <value>"),
+        Sub("reset", "Reset a setting to its default",          "<key>"),
+    )),
+
+    Command("/persona", "Switch the analyst persona", (
+        Sub("set",  "Set active persona",  "<redteam|pentest|ctf>",
+            ("redteam", "pentest", "ctf")),
+        Sub("show", "Show current persona"),
+    )),
+
+    Command("/export", "Export IOC Activities + Beacons xlsx from current op state",
+            (Sub("", "Generates ioc_<ts>.xlsx with Activities and Beacons sheets"),)),
+    Command("/endop", "End the operation — stops analyst, exports IOC report, exits",
+            (Sub("", "Stops log watching, runs IOC export, saves report to op directory"),)),
     Command("/status", "Show current op summary (beacons, hosts, creds, attack paths)",
             (Sub("", "Op state summary"),)),
     Command("/clear",  "Clear the activity log",
@@ -165,9 +180,9 @@ def complete(text: str) -> str | None:
 # ── Help rendering ────────────────────────────────────────────────────────────
 
 _HELP_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Setup",      ("/info", "/key", "/provider", "/analyst")),
+    ("Setup",      ("/info", "/key", "/provider", "/analyst", "/config", "/persona")),
     ("Operation",  ("/op", "/scope", "/c2")),
-    ("Actions",    ("/export", "/status", "/clear")),
+    ("Actions",    ("/export", "/endop", "/status", "/clear")),
     ("Session",    ("/help", "/exit", "/quit", "/q")),
 )
 
@@ -206,10 +221,12 @@ def _overview_lines() -> list[str]:
         "",
         "Keyboard shortcuts:",
         "  Ctrl+←/→    Resize left pane",
-        "  Ctrl+↑/↓    Resize next steps panel",
+        "  Ctrl+↑/↓    Resize leads panel",
+        "  Ctrl+L      Full activity log",
         "  Ctrl+E      Export IOC",
         "  Ctrl+P/N    Command history",
         "  Tab         Complete command",
+        "  Enter (finding) → detail modal",
     ]
     return lines
 
@@ -304,16 +321,23 @@ def handle_provider(args: list[str]) -> tuple[list[str], bool]:
     sub = " ".join(args[:2]) if len(args) >= 2 else (args[0] if args else "")
 
     if not args or sub == "list" or args[0] == "list":
-        from core.llm_client import load_sub_token
-        active = config.get("active_provider", "bedrock")
+        from core.llm_client import load_sub_token, PROVIDERS, resolve_provider_key
+        active = config.get("active_provider", "anthropic")
         lines = [f"Active provider: [bold]{active}[/bold]", ""]
         for p in _PROVIDERS:
             if p == "bedrock":
                 status = "[green]ready[/green]  (AWS credentials)"
             elif p == "anthropic-sub":
                 status = "[green]ready[/green]" if load_sub_token() else "[dim]not logged in — run: sidesaddle login[/dim]"
+            elif p in PROVIDERS:
+                spec = PROVIDERS[p]
+                key = resolve_provider_key(spec)
+                if key or spec.key_optional:
+                    status = "[green]key set[/green]" if key else "[green]no key needed[/green]"
+                else:
+                    status = f"[dim]no key — /key set {p} <key>[/dim]"
             else:
-                status = "[green]ready[/green]" if config.get_api_key(p) else "[dim]no key — /key set anthropic <key>[/dim]"
+                status = "[green]ready[/green]" if config.get_api_key(p) else f"[dim]no key — /key set {p} <key>[/dim]"
             marker = "  [yellow]← active[/yellow]" if p == active else ""
             lines.append(f"  {p:<18} {status}{marker}")
         lines += ["", f"  Switch: /provider set <{'|'.join(_PROVIDERS)}>",
@@ -321,6 +345,11 @@ def handle_provider(args: list[str]) -> tuple[list[str], bool]:
         return lines, True
 
     if args[0] == "set" and len(args) >= 2:
+        # /provider set local <url>  — convenience for the local base URL
+        if args[1].lower() == "local" and len(args) >= 3:
+            config.set_value("active_provider", "local")
+            config.set_value("local_base_url", args[2])
+            return [f"[green]Provider → local  base URL → {args[2]}[/green]"], True
         provider = args[1].lower()
         if provider not in _PROVIDERS:
             return [f"Unknown provider: {provider!r}  ({', '.join(_PROVIDERS)})"], False
@@ -330,15 +359,20 @@ def handle_provider(args: list[str]) -> tuple[list[str], bool]:
             from core.llm_client import load_sub_token
             if not load_sub_token():
                 lines.append("  [yellow]Not logged in — run: sidesaddle login[/yellow]")
-        elif provider != "bedrock" and not config.get_api_key(provider):
-            lines.append(f"  [yellow]No key set — run: /key set {provider} <key>[/yellow]")
+        elif provider == "bedrock":
+            pass
+        else:
+            from core.llm_client import PROVIDERS, resolve_provider_key
+            spec = PROVIDERS.get(provider)
+            if spec and not resolve_provider_key(spec) and not spec.key_optional:
+                lines.append(f"  [yellow]No key set — run: /key set {provider} <key>[/yellow]")
         lines.append(f"  Current model: {_current_model(provider)}  (change: /provider model set <id>)")
         return lines, True
 
     if args[0] == "model":
         sub2 = args[1] if len(args) > 1 else ""
         if sub2 == "list":
-            provider = args[2].lower() if len(args) > 2 else config.get("active_provider", "bedrock")
+            provider = args[2].lower() if len(args) > 2 else config.get("active_provider", "anthropic")
             return _model_list(provider)
         if sub2 == "set" and len(args) > 2:
             return _model_set(args[2])
@@ -347,19 +381,28 @@ def handle_provider(args: list[str]) -> tuple[list[str], bool]:
     return _command_help("/provider") or [], False
 
 
+_MODEL_KEY = {
+    "anthropic":     "anthropic.model",
+    "bedrock":       "bedrock.model",
+    "anthropic-sub": "anthropic.model",
+    "openrouter":    "openrouter.model",
+    "nvidia":        "nvidia.model",
+    "local":         "local.model",
+}
+
+
 def _current_model(provider: str | None = None) -> str:
     from core import config
-    p = provider or config.get("active_provider", "bedrock")
-    if p == "bedrock":
-        return config.get("bedrock.model", "(not set)")
-    return config.get("anthropic.model", "(not set)")
+    p = provider or config.get("active_provider", "anthropic")
+    key = _MODEL_KEY.get(p, "anthropic.model")
+    return config.get(key, "(not set)") or "(not set)"
 
 
 def _model_list(provider: str) -> tuple[list[str], bool]:
     from core import config
     if provider not in _PROVIDERS:
         return [f"Unknown provider: {provider!r}  ({', '.join(_PROVIDERS)})"], False
-    model_key = "bedrock.model" if provider == "bedrock" else "anthropic.model"
+    model_key = _MODEL_KEY.get(provider, "anthropic.model")
     current = config.get(model_key, "")
 
     if provider == "bedrock":
@@ -370,10 +413,21 @@ def _model_list(provider: str) -> tuple[list[str], bool]:
         token = load_sub_token()
         model_ids = _fetch_anthropic_models(bearer_token=token) if token else []
         source = "live from API" if model_ids else "not logged in — run: sidesaddle login"
-    else:
+    elif provider == "anthropic":
         key = config.get_api_key("anthropic")
         model_ids = _fetch_anthropic_models(api_key=key) if key else []
         source = "live from API" if model_ids else "no key — /key set anthropic <key>"
+    elif provider in ("openrouter", "nvidia", "local"):
+        from core.llm_client import PROVIDERS as _PROV, resolve_provider_key, _models_url_for
+        spec = _PROV.get(provider)
+        if spec:
+            api_key = resolve_provider_key(spec)
+            model_ids = _fetch_openai_compat_models(spec, api_key)
+            source = "live from API" if model_ids else "no key or server not reachable"
+        else:
+            model_ids, source = [], "unknown provider"
+    else:
+        model_ids, source = [], "unknown provider"
 
     lines = [f"Models for [bold]{provider}[/bold]  [{source}]",
              f"  Current: [cyan]{current or '(not set)'}[/cyan]", ""]
@@ -388,10 +442,28 @@ def _model_list(provider: str) -> tuple[list[str], bool]:
 
 def _model_set(model_id: str) -> tuple[list[str], bool]:
     from core import config
-    provider = config.get("active_provider", "bedrock")
-    key = "bedrock.model" if provider == "bedrock" else "anthropic.model"
+    provider = config.get("active_provider", "anthropic")
+    key = _MODEL_KEY.get(provider, "anthropic.model")
     config.set_value(key, model_id)
     return [f"[green]Model → {model_id}[/green]  (provider: {provider})"], True
+
+
+def _fetch_openai_compat_models(spec, api_key: str | None) -> list[str]:
+    """Fetch model IDs from an OpenAI-compat /models endpoint."""
+    import json, urllib.request
+    from core.llm_client import _models_url_for, _auth_headers
+    url = _models_url_for(spec)
+    if not url:
+        return []
+    hdrs = {**_auth_headers(spec, api_key), **spec.extra_headers}
+    try:
+        req = urllib.request.Request(url, headers=hdrs)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        items = data.get("data", data) if isinstance(data, dict) else data
+        return [m.get("id", "") for m in items if isinstance(m, dict) and m.get("id")]
+    except Exception:
+        return []
 
 
 def _fetch_anthropic_models(*, api_key: str | None = None, bearer_token: str | None = None) -> list[str]:
@@ -479,9 +551,12 @@ def handle_key(args: list[str]) -> tuple[list[str], bool]:
         provider, key_val = args[1], args[2]
         if provider not in _KEY_PROVIDERS:
             return [f"Unknown provider: {provider!r}  ({', '.join(_KEY_PROVIDERS)})"], False
-        config.set_api_key(provider, key_val)
+        persisted = config.set_api_key(provider, key_val)
         masked = key_val[:4] + "…" + key_val[-4:] if len(key_val) > 8 else "****"
-        return [f"[green]{provider} key stored[/green]  ({masked})"], True
+        lines = [f"[green]{provider} key stored[/green]  ({masked})"]
+        if not persisted:
+            lines.append("[yellow]Warning: keyring unavailable — key is session-only and will not persist[/yellow]")
+        return lines, True
 
     if sub == "clear":
         import keyring
@@ -496,6 +571,94 @@ def handle_key(args: list[str]) -> tuple[list[str], bool]:
         return results, True
 
     return ["Usage: /key set <provider> <key>  |  /key list  |  /key clear [provider]"], False
+
+
+def handle_config(args: list[str]) -> tuple[list[str], bool]:
+    from core import config, settings
+    if not args:
+        return _command_help("/config") or [], False
+    sub = args[0]
+
+    if sub == "list":
+        group_filter = args[1].capitalize() if len(args) > 1 else None
+        lines = ["Settings  ([yellow]*[/yellow] = changed from default)", ""]
+        for g in settings.GROUPS:
+            if group_filter and g != group_filter:
+                continue
+            grp_settings = settings.settings_in_group(g)
+            if not grp_settings:
+                continue
+            lines.append(f"[bold]{g}[/bold]")
+            for s in grp_settings:
+                val = settings.current_value(s)
+                marker = "[yellow]*[/yellow] " if settings.is_changed(s) else "  "
+                lines.append(f"  {marker}{s.key:<30} {settings.format_value(val)}")
+                lines.append(f"      [dim]{s.desc}[/dim]")
+            lines.append("")
+        return lines, True
+
+    if sub == "get" and len(args) >= 2:
+        s = settings.get_setting(args[1])
+        if not s:
+            return [f"Unknown setting: {args[1]!r}  (see /config list)"], False
+        val = settings.current_value(s)
+        lines = [
+            f"[cyan]{s.key}[/cyan]  [{s.type}]  group: {s.group}",
+            f"  Value:   {settings.format_value(val)}",
+            f"  Default: {settings.format_value(s.default)}",
+            f"  {s.desc}",
+        ]
+        if s.choices:
+            lines.append(f"  Choices: {', '.join(s.choices)}")
+        return lines, True
+
+    if sub == "set" and len(args) >= 3:
+        s = settings.get_setting(args[1])
+        if not s:
+            return [f"Unknown setting: {args[1]!r}  (see /config list)"], False
+        raw = " ".join(args[2:])
+        val, err = settings.coerce(s, raw)
+        if err:
+            return [f"[red]{err}[/red]"], False
+        config.set_value(s.key, val)
+        return [f"[green]{s.key} → {settings.format_value(val)}[/green]"], True
+
+    if sub == "reset" and len(args) >= 2:
+        s = settings.get_setting(args[1])
+        if not s:
+            return [f"Unknown setting: {args[1]!r}  (see /config list)"], False
+        config.set_value(s.key, s.default)
+        return [f"[green]{s.key} reset to default: {settings.format_value(s.default)}[/green]"], True
+
+    return _command_help("/config") or [], False
+
+
+def handle_persona(args: list[str]) -> tuple[list[str], bool]:
+    from core import config
+    from pathlib import Path
+    _PERSONAS = ("redteam", "pentest", "ctf")
+    if not args:
+        return _command_help("/persona") or [], False
+    sub = args[0]
+
+    if sub == "show":
+        current = config.get("persona", "redteam")
+        persona_path = Path(__file__).parent.parent / "agents" / current / "persona.md"
+        if persona_path.exists():
+            import re
+            text = persona_path.read_text(encoding="utf-8")
+            text = re.sub(r"^---\s*\n.*?\n---\s*\n", "", text, flags=re.DOTALL).strip()
+            return [f"Active persona: [bold]{current}[/bold]", ""] + text.splitlines()[:50], True
+        return [f"Active persona: [bold]{current}[/bold]", "  (persona file not found)"], True
+
+    if sub == "set" and len(args) >= 2:
+        persona = args[1].lower()
+        if persona not in _PERSONAS:
+            return [f"Unknown persona: {persona!r}  ({', '.join(_PERSONAS)})"], False
+        config.set_value("persona", persona)
+        return [f"[green]Persona → {persona}[/green]"], True
+
+    return _command_help("/persona") or [], False
 
 
 def handle_scope(args: list[str]) -> tuple[list[str], bool]:
@@ -565,6 +728,14 @@ def dispatch(text: str) -> tuple[list[str], bool] | None:
         sub = cmd.replace("/scope", "").strip()
         return handle_scope((sub.split() + args) if sub else args)
 
+    if cmd in ("/config", "/config list", "/config get", "/config set", "/config reset"):
+        sub = cmd.replace("/config", "").strip()
+        return handle_config((sub.split() + args) if sub else args)
+
+    if cmd in ("/persona", "/persona set", "/persona show"):
+        sub = cmd.replace("/persona", "").strip()
+        return handle_persona((sub.split() + args) if sub else args)
+
     # /op dir is stateless (config only); new/list/load are app-state
     if cmd == "/op dir":
         from core import config
@@ -606,6 +777,10 @@ def dispatch(text: str) -> tuple[list[str], bool] | None:
         config.set_api_key("nighthawk_pass", args[1])
         return [f"[green]Credentials stored[/green]  (user: {args[0]})",
                 "  Run /c2 connect to start polling"], True
+
+    # /frontier set — modifies engagement state, handled by app.py
+    if cmd in ("/frontier", "/frontier set"):
+        return None
 
     # App-state commands — handled by app.py
     return None

@@ -84,7 +84,9 @@ class Lead(BaseModel):
     reach_level: str = "vuln"    # kill-chain rung this reaches IF it succeeds
     prior: float = 0.5           # 0..1 estimated likelihood it advances
     cost: str = "medium"         # cheap | medium | expensive
+    opsec: str = "medium"        # low | medium | high | critical — noise/detection risk of command
     status: str = "open"         # open | active | confirmed | refuted | exhausted
+    command: str = ""            # literal runnable command — no embedded credentials
     notes: str = ""
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
@@ -134,11 +136,19 @@ class Surface(BaseModel):
 
 
 class Activity(BaseModel):
+    activity_id: str = Field(default_factory=lambda: f"ACT-{str(uuid.uuid4())[:6].upper()}")
+    beacon_id: str = ""
     timestamp: str
-    command: str
-    host: str = ""
     ioc_type: str = "unknown"    # op | local | unknown
-    execution_context: str = ""
+    execution_context: str = ""  # C2 > HOST | Proxychains > C2 > HOST | <local> | SSH > HOST
+    execution_host: str = ""     # host the command ran ON
+    user_context: str = ""
+    command_action: str = ""     # exact command with secrets redacted
+    result: str = ""             # one-line interpretation
+    observable_artifacts: str = ""  # target-visible artifacts, newline-separated
+    # legacy compat — populated by old state files only
+    command: str = ""
+    host: str = ""
     output_summary: str = ""
 
 
@@ -283,7 +293,9 @@ class EngagementState(BaseModel):
 
         # ── Activities ────────────────────────────────────────────────────────
         for a in update.get("activities", []):
-            if not any(x.command == a["command"] and x.timestamp == a["timestamp"]
+            cmd_key = a.get("command_action") or a.get("command", "")
+            if not any(x.timestamp == a.get("timestamp", "")
+                       and (x.command_action or x.command) == cmd_key
                        for x in self.activities):
                 self.activities.append(Activity(**a))
 
