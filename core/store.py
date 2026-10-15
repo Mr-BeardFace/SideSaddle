@@ -302,6 +302,7 @@ class EngagementStore:
             ("leads",           "technique TEXT"),
             ("leads",           "command TEXT"),
             ("leads",           "opsec TEXT"),
+            ("leads",           "insight TEXT DEFAULT 'routine'"),
         ]
         for table, col_def in migrations:
             assert table in self._MIGRATION_TABLES, f"Unexpected migration table: {table!r}"
@@ -724,6 +725,7 @@ class EngagementStore:
         technique: str = "",
         command: str = "",
         opsec: str = "medium",
+        insight: str = "routine",
         origin_id: int | None = None,
         created_by: str = "analyst",
         notes: str = "",
@@ -732,10 +734,10 @@ class EngagementStore:
         cur = self._conn.execute(
             """INSERT INTO leads
                (kind, description, target, technique, reach_level, prior, cost,
-                opsec, command, origin_id, created_by, notes, ts)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                opsec, command, insight, origin_id, created_by, notes, ts)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (kind, description, target, technique, reach_level, prior, cost,
-             opsec, command, origin_id, created_by, notes,
+             opsec, command, insight, origin_id, created_by, notes,
              ts or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
         )
         self._conn.commit()

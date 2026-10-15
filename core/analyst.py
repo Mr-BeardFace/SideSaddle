@@ -99,6 +99,11 @@ LEADS — next attack actions on the kill chain:
 - opsec: detection/noise risk of executing the command — "low" | "medium" | "high" | "critical" (same scale as advisory OPSEC levels). This is independent of cost.
 - command: a literal runnable shell command for this lead — no embedded credentials, use placeholders like <user> or <hash> where creds are required.
 - status: always "open" — operator marks confirmed/refuted/exhausted.
+- insight: "routine" | "notable"
+  "notable" = the lead derives from engagement-specific evidence AND requires domain knowledge the operator may not carry.
+  Examples of notable: a specific config file known to store credentials for this software version, a SUID binary found in find output that maps to a known exploit, a specific CVE match on a version banner, an AD misconfiguration identified from enumeration output.
+  Examples of routine: read /etc/shadow, sudo -l, try root directly, basic post-exploit enumeration any operator would run in the first 10 minutes regardless of what they've seen.
+  Rule: if the command could appear in any generic post-exploitation checklist without regard to what's in these logs, it's "routine". If the insight was derived from something specific in THIS engagement's log output, it's "notable".
 - Only emit leads that are directly suggested by evidence in the current logs.
 
 AUTH ATTEMPTS — credential testing log:
@@ -254,6 +259,8 @@ _ANALYZE_TOOL = {
                         "cost": {"type": "string", "enum": ["cheap", "medium", "expensive"]},
                         "opsec": {"type": "string", "enum": ["low", "medium", "high", "critical"], "description": "detection/noise risk of executing the command"},
                         "command": {"type": "string", "description": "literal runnable shell command — no embedded credentials"},
+                        "insight": {"type": "string", "enum": ["routine", "notable"],
+                            "description": "notable = derived from engagement-specific evidence + domain knowledge; routine = standard post-exploit checklist step"},
                         "notes": {"type": "string"},
                     },
                     "required": ["description", "reach_level"],
@@ -813,6 +820,7 @@ class Analyst:
                     technique=l.get("technique", ""),
                     command=l.get("command", ""),
                     opsec=l.get("opsec", "medium"),
+                    insight=l.get("insight", "routine"),
                     created_by="analyst",
                     notes=l.get("notes", ""),
                 )

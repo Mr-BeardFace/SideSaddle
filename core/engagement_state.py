@@ -87,6 +87,7 @@ class Lead(BaseModel):
     opsec: str = "medium"        # low | medium | high | critical — noise/detection risk of command
     status: str = "open"         # open | active | confirmed | refuted | exhausted
     command: str = ""            # literal runnable command — no embedded credentials
+    insight: str = "routine"     # routine | notable — notable = analyst-added domain knowledge
     notes: str = ""
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 

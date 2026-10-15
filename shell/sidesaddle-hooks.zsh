@@ -1,22 +1,29 @@
 # SideSaddle shell hooks
 # Source this from ~/.zshrc or place in ~/.oh-my-zsh/custom/
 #
-# SideSaddle writes your active op's log directory to:
-#   ~/.local/share/sidesaddle/.active_log_dir
-# when it starts and whenever you switch ops (/op new <name>).
-# These hooks read that file automatically — no manual setup needed.
+# TUI mode:   SideSaddle writes the active log dir to .active_log_dir on start.
+# Daemon mode: `saddle start --op <name>` spawns a headless daemon.
+#              RPROMPT shows the current badge (frontier advance / OPSEC / notable lead).
 #
-# Start SideSaddle, set your op, then run ss_op to begin TTY capture.
+# Both modes share command logging and SSH/evil-winrm capture.
 
 autoload -Uz add-zsh-hook
 
 _SS_STATE_FILE="${HOME}/.local/share/sidesaddle/.active_log_dir"
-# Resolve the hooks directory at source time — ${0:A:h} is wrong when sourced from .zshrc
+_SS_BASE="${HOME}/.local/share/sidesaddle"
+# Resolve the hooks directory at source time
 _SS_HOOKS_DIR="${${(%):-%x}:A:h}"
 
 _ss_log_dir() {
-    # Returns the active log dir, or empty if SideSaddle isn't running an op
     [[ -f "$_SS_STATE_FILE" ]] && cat "$_SS_STATE_FILE"
+}
+
+_ss_op_dir() {
+    local log_dir
+    log_dir=$(_ss_log_dir)
+    [[ -z "$log_dir" ]] && return
+    # log_dir = <op_dir>/logs  →  op_dir = parent
+    echo "${log_dir%/logs}"
 }
 
 # ── Command logging via preexec ───────────────────────────────────────────────
@@ -25,6 +32,8 @@ _ss_preexec() {
     local log_dir
     log_dir=$(_ss_log_dir)
     [[ -z "$log_dir" ]] && return
+    # Don't log saddle commands — they're operator tooling, not engagement activity
+    [[ "$1" == saddle* ]] && return
     mkdir -p "$log_dir"
     local ts
     ts=$(date '+%Y-%m-%d %H:%M:%S')
@@ -32,6 +41,53 @@ _ss_preexec() {
 }
 
 add-zsh-hook preexec _ss_preexec
+
+# ── RPROMPT badge from daemon ─────────────────────────────────────────────────
+
+_ss_precmd() {
+    local op_dir badge_file _ss_badge _ss_badge_type
+    op_dir=$(_ss_op_dir)
+    [[ -z "$op_dir" ]] && return
+    badge_file="${op_dir}/.badge"
+    if [[ ! -f "$badge_file" ]]; then
+        RPROMPT=""
+        return
+    fi
+    # .badge: line 1 = badge text, line 2 = badge_type
+    { read -r _ss_badge; read -r _ss_badge_type } < "$badge_file"
+    if [[ -n "$_ss_badge" ]]; then
+        case "$_ss_badge_type" in
+            frontier)     RPROMPT="%F{green}[${_ss_badge}]%f" ;;
+            notable_lead) RPROMPT="%F{cyan}[lead]%f" ;;
+            opsec)        RPROMPT="%F{red}[${_ss_badge}]%f" ;;
+            *)            RPROMPT="%F{yellow}[${_ss_badge}]%f" ;;
+        esac
+    else
+        RPROMPT=""
+    fi
+}
+
+add-zsh-hook precmd _ss_precmd
+
+# ── Session registration with daemon ─────────────────────────────────────────
+# Register this shell if a daemon is already running for the active op.
+# `saddle start` registers the calling shell directly; this covers additional
+# terminals opened after the daemon is already up.
+
+_ss_auto_register() {
+    local op_dir
+    op_dir=$(_ss_op_dir)
+    [[ -z "$op_dir" ]] && return
+    [[ -S "${op_dir}/.daemon.sock" ]] || return
+    saddle register $$ 2>/dev/null
+}
+_ss_auto_register
+
+# Unregister on shell exit
+_ss_exit_hook() {
+    saddle unregister $$ 2>/dev/null
+}
+trap '_ss_exit_hook' EXIT
 
 # ── SSH wrapper: capture full interactive session ─────────────────────────────
 
@@ -81,13 +137,12 @@ evil-winrm() {
 # ── ss_op: start TTY capture for the active op ───────────────────────────────
 
 ss_op() {
-    # No arguments needed. Reads the active op from SideSaddle's state file.
-    # Start SideSaddle and set your op (/op new <name>) first.
     local log_dir
     log_dir=$(_ss_log_dir)
     if [[ -z "$log_dir" ]]; then
         echo "SideSaddle: no active op found."
-        echo "  Start SideSaddle and set an op first (/op new <name>)."
+        echo "  TUI mode: start SideSaddle and set an op (/op new <name>)."
+        echo "  Daemon mode: saddle start --op <name>"
         return 1
     fi
     mkdir -p "$log_dir"
@@ -109,12 +164,14 @@ ss_op() {
     unset _SS_IN_SCRIPT
 }
 
-# ── Auto-start: begin TTY capture when a terminal opens with an active op ────
+# ── Auto-start TTY capture (TUI mode only) ───────────────────────────────────
+# Skipped when a daemon socket is present — daemon mode doesn't need ss_op auto-start.
 
 if [[ -z "$_SS_IN_SCRIPT" ]]; then
     _ss_auto_log=$(_ss_log_dir)
-    if [[ -n "$_ss_auto_log" ]]; then
+    _ss_auto_op_dir=$(_ss_op_dir)
+    if [[ -n "$_ss_auto_log" && ! -S "${_ss_auto_op_dir}/.daemon.sock" ]]; then
         ss_op
     fi
-    unset _ss_auto_log
+    unset _ss_auto_log _ss_auto_op_dir
 fi
