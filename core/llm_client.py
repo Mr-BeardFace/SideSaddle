@@ -551,6 +551,7 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 8192,
+        thinking: dict | None = None,
     ) -> Any:
         provider = config.get("active_provider", "anthropic")
         if provider == "bedrock":
@@ -566,7 +567,7 @@ class LLMClient:
                     self._no_temperature_models.add(model)
                     return _call_openai_compat(spec, model, system, messages, tools, max_tokens)
                 raise
-        return self._run_anthropic(model, system, messages, tools, max_tokens)
+        return self._run_anthropic(model, system, messages, tools, max_tokens, thinking)
 
     @staticmethod
     def _with_conversation_cache(messages: list[dict]) -> list[dict]:
@@ -589,7 +590,8 @@ class LLMClient:
         return messages[:-1] + [{**last, "content": new_content}]
 
     def _run_anthropic(self, model: str, system: str, messages: list[dict],
-                       tools: list[dict] | None, max_tokens: int) -> Any:
+                       tools: list[dict] | None, max_tokens: int,
+                       thinking: dict | None = None) -> Any:
         key = config.get_api_key("anthropic")
         client = anthropic.Anthropic(api_key=key)
 
@@ -606,9 +608,13 @@ class LLMClient:
             "system": system_blocks,
             "messages": self._with_conversation_cache(messages),
         }
-        temp = config.get("temp")
-        if temp is not None and model not in self._no_temperature_models:
-            kwargs["temperature"] = temp
+        if thinking:
+            kwargs["thinking"] = thinking
+            kwargs["temperature"] = 1  # required by Anthropic when thinking is enabled
+        else:
+            temp = config.get("temp")
+            if temp is not None and model not in self._no_temperature_models:
+                kwargs["temperature"] = temp
         if cached_tools:
             kwargs["tools"] = cached_tools
 

@@ -674,7 +674,8 @@ class Analyst:
                 system=system,
                 messages=messages,
                 tools=[_ANALYZE_TOOL],
-                max_tokens=8192,
+                max_tokens=12000,
+                thinking={"type": "enabled", "budget_tokens": 6000},
             )
 
             self._track_usage(response)
