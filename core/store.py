@@ -643,6 +643,13 @@ class EngagementStore:
 
     # ── analyst cycles ────────────────────────────────────────────────────────
 
+    def set_frontier(self, level: str) -> None:
+        """Store a manual frontier override (cleared when analyst next runs a cycle)."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('frontier', ?)", (level,)
+        )
+        self._conn.commit()
+
     def add_analyst_cycle(
         self,
         frontier_level: str,
@@ -653,6 +660,8 @@ class EngagementStore:
         advisory: str = "",
         ts: str | None = None,
     ) -> int:
+        # Clear any manual override — analyst assessment now takes over
+        self._conn.execute("DELETE FROM meta WHERE key = 'frontier'")
         cur = self._conn.execute(
             """INSERT INTO analyst_cycles
                (ts, frontier_level, summary, hypothesis, next_steps, op_picture, advisory)
@@ -957,6 +966,13 @@ class EngagementStore:
                     last_analysis = datetime.strptime(c["ts"], "%Y-%m-%d %H:%M:%S")
                 except Exception:
                     pass
+
+        # Manual override from `saddle frontier set` (cleared on next analyst cycle)
+        meta_row = self._conn.execute(
+            "SELECT value FROM meta WHERE key = 'frontier'"
+        ).fetchone()
+        if meta_row and meta_row[0]:
+            frontier = meta_row[0]
 
         activities = [
             Activity(

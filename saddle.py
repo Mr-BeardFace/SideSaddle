@@ -24,6 +24,7 @@ _SS_BASE = Path.home() / ".local" / "share" / "sidesaddle"
 _SESSIONS_DIR = _SS_BASE / "sessions"
 _ACTIVE_LOG_DIR_FILE = _SS_BASE / ".active_log_dir"
 _PROJECT_DIR = Path(__file__).parent
+sys.path.insert(0, str(_PROJECT_DIR))
 
 _LEAD_STATUSES   = ("open", "active", "confirmed", "refuted", "exhausted")
 _FRONTIER_LEVELS = ("recon", "service", "vuln", "exploited", "foothold", "user", "privesc", "root")
@@ -88,7 +89,6 @@ def _unregister_pid(pid: int) -> None:
 
 def _open_store(op: str | None = None):
     """Open EngagementStore for op. Returns (store, op_name)."""
-    sys.path.insert(0, str(_PROJECT_DIR))
     from core import config
     from core.auth import resolve_passphrase
     from core.store import BadPassphrase, EngagementStore
@@ -145,7 +145,6 @@ def cli() -> None:
 @click.option("--op", required=True, help="Op name")
 def start(op: str) -> None:
     """Start the SideSaddle daemon for an op."""
-    sys.path.insert(0, str(_PROJECT_DIR))
     from core import config
     from core.auth import cache_passphrase, resolve_passphrase
     from core.store import BadPassphrase, EngagementStore
@@ -349,7 +348,8 @@ def lead(lead_id: int, action: str, op: str | None) -> None:
 
 @cli.command()
 @click.option("--op", default=None)
-def creds(op: str | None) -> None:
+@click.option("--reveal", is_flag=True, default=False, help="Show full secrets (plaintext)")
+def creds(op: str | None, reveal: bool) -> None:
     """List credentials."""
     store, _ = _open_store(op)
     try:
@@ -371,12 +371,15 @@ def creds(op: str | None) -> None:
     t.add_column("Source Host")
 
     for r in rows:
-        secret = r.get("secret", "")
-        masked = (secret[:2] + "…" + secret[-2:]) if len(secret or "") > 6 else (secret or "(none)")
+        secret = r.get("secret", "") or ""
+        if reveal:
+            display_secret = secret or "(none)"
+        else:
+            display_secret = (secret[:2] + "…" + secret[-2:]) if len(secret) > 6 else (secret or "(none)")
         t.add_row(
             r.get("cred_type", ""),
             r.get("username", ""),
-            masked,
+            display_secret,
             r.get("cred_format", ""),
             r.get("location", ""),
             r.get("service", ""),
@@ -615,14 +618,7 @@ def frontier_set(level: str, op: str | None) -> None:
     """Manually override the frontier level."""
     store, op_name = _open_store(op)
     try:
-        state = store.load_state()
-        state.frontier = level
-        store.save_cursors(state.log_cursors)
-        # Persist frontier in meta
-        store._conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('frontier', ?)", (level,)
-        )
-        store._conn.commit()
+        store.set_frontier(level)
     finally:
         store.close()
     _console.print(f"[bold]{op_name}[/bold] frontier → [cyan]{level}[/cyan]")
@@ -632,7 +628,6 @@ def frontier_set(level: str, op: str | None) -> None:
 # Delegate to the existing stateless handlers in ui/commands.py
 
 def _dispatch_tui_command(text: str) -> None:
-    sys.path.insert(0, str(_PROJECT_DIR))
     from ui.commands import dispatch
     result = dispatch(text)
     if result is None:
@@ -824,10 +819,8 @@ def ai(message: tuple[str, ...], op: str | None) -> None:
 @click.option("--op", default=None)
 def export(op: str | None) -> None:
     """Export IOC activities + beacons to xlsx."""
-    sys.path.insert(0, str(_PROJECT_DIR))
     from core import config
     from core.analyst import Analyst
-    from core.engagement_state import EngagementState
 
     store, op_name = _open_store(op)
     try:
@@ -849,7 +842,6 @@ def export(op: str | None) -> None:
 @cli.command("ops")
 def list_ops() -> None:
     """List all saved operations."""
-    sys.path.insert(0, str(_PROJECT_DIR))
     from core.config import _SS_BASE
     ops = sorted(p.name for p in _SS_BASE.iterdir()
                  if p.is_dir() and (p / "engagement.db").exists())

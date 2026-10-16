@@ -251,7 +251,7 @@ def key_cmd(action: str, provider: str) -> None:
 def install() -> None:
     """Print setup instructions."""
     here = Path(__file__).parent
-    click.echo(f"Run: bash {here}/install.sh")
+    click.echo(f"Run: bash {here}/shell/install.sh")
 
 
 if __name__ == "__main__":
