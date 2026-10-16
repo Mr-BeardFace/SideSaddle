@@ -893,6 +893,7 @@ class EngagementStore:
                 status=l.get("status") or "open",
                 command=l.get("command") or "",
                 opsec=l.get("opsec") or "medium",
+                insight=l.get("insight") or "routine",
                 notes=l.get("notes") or "",
             )
             for l in self.get_leads()
