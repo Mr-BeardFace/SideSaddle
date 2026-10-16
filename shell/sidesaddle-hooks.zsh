@@ -15,7 +15,17 @@ _SS_BASE="${HOME}/.local/share/sidesaddle"
 _SS_HOOKS_DIR="${${(%):-%x}:A:h}"
 _SS_REPO_DIR="${_SS_HOOKS_DIR:h}"
 
-alias saddle="python3 '${_SS_REPO_DIR}/saddle.py'"
+# Auto-detect Python: prefer repo venv, then any active venv, then system python3
+_ss_python() {
+    if [[ -x "${_SS_REPO_DIR}/.venv/bin/python3" ]]; then
+        echo "${_SS_REPO_DIR}/.venv/bin/python3"
+    elif [[ -n "$VIRTUAL_ENV" && -x "${VIRTUAL_ENV}/bin/python3" ]]; then
+        echo "${VIRTUAL_ENV}/bin/python3"
+    else
+        echo "python3"
+    fi
+}
+saddle() { "$(_ss_python)" "${_SS_REPO_DIR}/saddle.py" "$@"; }
 
 _ss_log_dir() {
     [[ -f "$_SS_STATE_FILE" ]] && cat "$_SS_STATE_FILE"

@@ -268,15 +268,17 @@ def status(op: str | None, clear_badge: bool) -> None:
 
 @cli.command()
 @click.option("--op", default=None)
+@click.option("--all", "show_all", is_flag=True, default=False, help="Show all leads")
 @click.option("--status", "filter_status", default=None,
               type=click.Choice(_LEAD_STATUSES), help="Filter by status")
 @click.option("--reach", default=None, type=click.Choice(_FRONTIER_LEVELS),
               help="Filter by reach level")
 @click.option("--notable", is_flag=True, default=False, help="Show only notable leads")
-def leads(op: str | None, filter_status: str | None, reach: str | None, notable: bool) -> None:
-    """List leads."""
+def leads(op: str | None, show_all: bool, filter_status: str | None, reach: str | None, notable: bool) -> None:
+    """Top 3 open leads for current frontier (--all to see everything)."""
     store, _ = _open_store(op)
     try:
+        state = store.load_state()
         rows = store.get_leads(status=filter_status)
     finally:
         store.close()
@@ -285,6 +287,12 @@ def leads(op: str | None, filter_status: str | None, reach: str | None, notable:
         rows = [r for r in rows if r.get("reach_level") == reach]
     if notable:
         rows = [r for r in rows if r.get("insight") == "notable"]
+
+    if not show_all and not filter_status:
+        # Default: open/active only, sorted by prior desc, top 3
+        rows = [r for r in rows if r.get("status") in ("open", "active")]
+        rows = sorted(rows, key=lambda r: float(r.get("prior") or 0), reverse=True)
+        rows = rows[:3]
 
     if not rows:
         _console.print("[dim]no leads[/dim]")
