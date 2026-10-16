@@ -25,6 +25,7 @@ _ss_python() {
         echo "python3"
     fi
 }
+unalias saddle 2>/dev/null
 saddle() { "$(_ss_python)" "${_SS_REPO_DIR}/saddle.py" "$@"; }
 
 _ss_log_dir() {
