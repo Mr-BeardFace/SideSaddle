@@ -81,7 +81,6 @@ touch "$ZSH_RC"
 cat >> "$ZSH_RC" <<EOF
 
 ${MARKER_START}
-alias saddle='python3 ${SADDLE_PY}'
 source '${HOOKS_ZSH}'
 ${MARKER_END}
 EOF

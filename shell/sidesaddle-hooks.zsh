@@ -11,8 +11,11 @@ autoload -Uz add-zsh-hook
 
 _SS_STATE_FILE="${HOME}/.local/share/sidesaddle/.active_log_dir"
 _SS_BASE="${HOME}/.local/share/sidesaddle"
-# Resolve the hooks directory at source time
+# Resolve the hooks directory at source time; repo root is one level up
 _SS_HOOKS_DIR="${${(%):-%x}:A:h}"
+_SS_REPO_DIR="${_SS_HOOKS_DIR:h}"
+
+alias saddle="python3 '${_SS_REPO_DIR}/saddle.py'"
 
 _ss_log_dir() {
     [[ -f "$_SS_STATE_FILE" ]] && cat "$_SS_STATE_FILE"
